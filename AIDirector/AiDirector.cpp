@@ -14,6 +14,7 @@
 #include "Camera/MainCamera.h"
 #include "Controllers/PlayerController.h"
 #include "Components/ActorComponent.h"
+#include "Components/ColliderComponent.h"
 #include "Components/HealthComponent.h"
 #include "Controllers/PathfindState.h"
 #include "Controllers/DeathState.h"
@@ -30,6 +31,7 @@
 #include <tge/script/BaseProperties.h>
 
 #include <algorithm>
+#include <fstream>
 #include <set>
 #include <unordered_set>
 #include <IconFontHeaders/IconsLucide.h>
@@ -53,37 +55,50 @@ void Forge::AIDirector::Init()
 	AddDebugMenu();
 #endif
 	myInitialized = false;
-	// myCellCenters.clear();
 	myGrid.clear();
 	myBlackboard = &ourAIBlackboard;
-	// myPlayer = nullptr;
 	myData.player = nullptr;
 	myLevelEnd = nullptr;
 	myData.playerController = nullptr;
 
-
 	Object* levelTransition = Locator::GetObjectManager()->FindObjectWithType(ObjectType::LevelTransition);
 	Object* player = Locator::GetObjectManager()->FindObjectWithType(ObjectType::Player);
 	myNavmesh = Locator::GetNavmesh();
+
+	// if neither level transition, player or navmesh exist, the director cannot do its work
 	if (levelTransition == nullptr || player == nullptr || myNavmesh == nullptr)
 	{
 		std::cout << "AIDirector FAILED!! in init()\n";
 		return;
 	}
 
-	// myPlayer = player;
 	myData.player = player;
 	myData.playerCamera = Locator::GetCameraManager()->GetMainCamera();
 	myLevelEnd = levelTransition;
 	myData.playerController = myData.player->GetComponent<ActorComponent>()->GetController<PlayerController>();
 	myBlackboard->SetValue("PlayerPos"_tgaid, myData.player->GetTransform().GetPosition());
+
+	const float playerHealth = static_cast<float>(myData.player->GetComponent<HealthComponent>()->GetMaxHealth());
+	myData.takingDamageStressValue = (static_cast<float>(myCommonZombieData.damage) / playerHealth) * DirectorStaticData::STRESS_MODIFIER;
+
+
+	//Settings director timers and horde data based of desired settings 
+	std::string path = "json/AIDirectorSettings.json";
+	std::ifstream jsonFileStream(Tga::Settings::ResolveAssetPath(path));
+	nlohmann::json jsonInSettings = nlohmann::json::parse(jsonFileStream);
+	myData.buildUpPhaseLength = jsonInSettings["buildUpPhaseLength"];
+	myData.hordeMinSize = jsonInSettings["hordeMinSize"];;
+	myData.hordeMaxSize = jsonInSettings["hordeMaxSize"];;
+	myData.hordeMinInterval = jsonInSettings["hordeMinInterval"];;
+	myData.hordeMaxInterval = jsonInSettings["hordeMaxInterval"];
+	myData.hordeTimer = myData.hordeMaxInterval;
+	myData.nextHordeMax = myData.hordeMaxSize;
+
 	if (!CreateGridAndMapWorld())
 	{
 		std::cout << "AIDirector FAILED!! in init()\n";
 		return;
 	}
-
-	// CreateEnemies();
 	myInitialized = true;
 
 	PopulateWorld();
@@ -93,6 +108,626 @@ void Forge::AIDirector::Init()
 }
 
 #ifndef _RETAIL
+void Forge::AIDirector::SetDirectorData()
+{
+	static bool showJsonDataSettings = false;
+	ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
+	ImGui::Checkbox(ICON_LC_SETTINGS, &showJsonDataSettings);
+	ImGui::PopFont();
+	ImGui::SetItemTooltip("Save or Revert Director Horde/Phase Settings");
+
+	if (showJsonDataSettings)
+	{
+		ImGui::DragFloat("Build Up Phase Length", &myData.buildUpPhaseLength, 0.01f, 10.f, 180.f);
+		ImGui::DragInt("Min Horde Size", &myData.hordeMinSize, 1.f, 1, ENEMY_MAX_SPAWN);
+		ImGui::DragInt("Max Horde Size", &myData.hordeMaxSize, 1.f, 1, ENEMY_MAX_SPAWN);
+		ImGui::DragFloat("Min Horde Interval", &myData.hordeMinInterval, 0.01f, 3.f, 60.f);
+		ImGui::DragFloat("Max Horde Interval", &myData.hordeMaxInterval, 0.01f, 3.f, 60.f);
+
+		if (ImGui::SmallButton("Save Director Settings"))
+		{
+			std::string path = "json/AIDirectorSettings.json";
+			std::ifstream jsonFileStream(Tga::Settings::ResolveAssetPath(path));
+			nlohmann::json jsonInSettings = nlohmann::json::parse(jsonFileStream);
+			nlohmann::json jsonOutSettings = jsonInSettings;
+
+			jsonOutSettings["buildUpPhaseLength"] = myData.buildUpPhaseLength;
+			jsonOutSettings["hordeMinSize"] = myData.hordeMinSize;
+			jsonOutSettings["hordeMaxSize"] = myData.hordeMaxSize;
+			jsonOutSettings["hordeMinInterval"] = myData.hordeMinInterval;
+			jsonOutSettings["hordeMaxInterval"] = myData.hordeMaxInterval;
+
+			std::ofstream jsonOut(Tga::Settings::ResolveAssetPath(path));
+			jsonOut << std::setw(4) << jsonOutSettings;
+		}
+		if (ImGui::SmallButton("Revert To Default Director Settings"))
+		{
+			std::string path = "json/AIDirectorSettings.json";
+			std::ifstream jsonFileStream(Tga::Settings::ResolveAssetPath(path));
+			nlohmann::json jsonInSettings = nlohmann::json::parse(jsonFileStream);
+			nlohmann::json jsonOutSettings = jsonInSettings;
+
+			myData.buildUpPhaseLength = DirectorStaticData::BUILD_UP_TIMER_RESET;
+			myData.hordeMinSize = DirectorStaticData::HORDE_MIN_SIZE;
+			myData.hordeMaxSize = DirectorStaticData::HORDE_MAX_SIZE;
+			myData.hordeMinInterval = DirectorStaticData::HORDE_TIMER_MIN_RESET;
+			myData.hordeMaxInterval = DirectorStaticData::HORDE_TIMER_MAX_RESET;
+
+			jsonOutSettings["buildUpPhaseLength"] = myData.buildUpPhaseLength;
+			jsonOutSettings["hordeMinSize"] = myData.hordeMinSize;
+			jsonOutSettings["hordeMaxSize"] = myData.hordeMaxSize;
+			jsonOutSettings["hordeMinInterval"] = myData.hordeMinInterval;
+			jsonOutSettings["hordeMaxInterval"] = myData.hordeMaxInterval;
+
+			std::ofstream jsonOut(Tga::Settings::ResolveAssetPath(path));
+			jsonOut << std::setw(4) << jsonOutSettings;
+		}
+	}
+}
+
+void Forge::AIDirector::PlayerDebug(std::string&)
+{
+	// PLAYER DEBUG
+	ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
+	ImGui::Checkbox(ICON_LC_PERSON_STANDING, &myPlayerDebug);
+	ImGui::PopFont();
+	ImGui::SetItemTooltip("Player Debug Data");
+
+	if (myPlayerDebug)
+	{
+
+		ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
+		ImGui::Text(ICON_LC_TARGET);
+		ImGui::PopFont();
+		ImGui::SameLine();
+		ImGui::DragFloat("Active Area Radius", &myActiveAreaRadius, 100.f, myGridCellHalfLength, 100000.f, "%.1f");
+
+		ImGui::Text("Player Stress Data");
+		float average = 0.f;
+		auto& stressRegisters = myData.latestPlayerStress.GetValues();
+		int valueAmount = static_cast<int>(stressRegisters.size());
+		int currentStressIndex = (static_cast<int>(CircularBuffer::MAX_SIZE) - static_cast<int>(myData.latestPlayerStress.GetCurrentIndex())) - 1;
+		static const Tga::Vector3f green = { 0.f, 1.f, 0.f };
+		static const Tga::Vector3f red = { 1.f, 0.f, 0.f };
+		for (int s = 0; s < valueAmount; ++s)
+		{
+			average += stressRegisters[s];
+		}
+		average /= static_cast<float>(valueAmount);
+		const Tga::Vector3f averageBlend = FMath::Lerp(green, red, average);
+		const Tga::Vector3f currentBlend = FMath::Lerp(green, red, myData.playerStress);
+
+
+		ImGui::PushStyleColor(ImGuiCol_FrameBg, { currentBlend.x * 0.4f, currentBlend.y * 0.4f, currentBlend.z * 0.4f, 1.f });
+		ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, { currentBlend.x * 0.6f, currentBlend.y * 0.6f, currentBlend.z * 0.6f, 1.f });
+		ImGui::PushStyleColor(ImGuiCol_FrameBgActive, { currentBlend.x * 0.8f, currentBlend.y * 0.8f, currentBlend.z * 0.8f, 1.f });
+		ImGui::PushStyleColor(ImGuiCol_SliderGrab, { currentBlend.x, currentBlend.y, currentBlend.z, 1.f });
+		float playerStress = myData.playerStress;
+		ImGui::VSliderFloat("current stress", ImVec2(18, 80), &playerStress, 0.0f, 1.0f, "");
+		ImGui::PopStyleColor(4);
+
+		ImGui::SameLine();
+		char overlay[64];
+		sprintf_s(overlay, "avg. last 10 seconds  %.*f", 2, average);
+
+		ImGui::PushStyleColor(ImGuiCol_PlotLines, { averageBlend.x, averageBlend.y, averageBlend.z, 1.f });
+		ImGui::PlotLines("average stress", myData.latestPlayerStress.GetValues().data(), valueAmount, currentStressIndex, overlay, 0.0f, 1.0f, ImVec2(0, 80.0f));
+		ImGui::SameLine();
+		ImGui::TextColored({ green.x, green.y, green.z, 1.f }, "0 = min");
+		ImGui::SameLine();
+		ImGui::TextColored({ averageBlend.x, averageBlend.y, averageBlend.z, 1.f }, " << intensity >>");
+		ImGui::SameLine();
+		ImGui::TextColored({ red.x, red.y, red.z, 1.f }, "1 = max");
+		ImGui::PopStyleColor(1);
+	}
+
+	ImGui::Separator();
+	ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
+	ImGui::Checkbox(ICON_LC_SKULL, &myEnemiesDebug);
+	ImGui::PopFont();
+	ImGui::SetItemTooltip("Open Enemy Debug");
+}
+
+void Forge::AIDirector::EnemyDebug(std::string& debugText)
+{
+	// ENEMIES DEBUG
+	if (myEnemiesDebug)
+	{
+		static Tga::Vector3f startPos = Tga::Vector3f::Zero;
+		static Tga::Vector3f endPos = Tga::Vector3f::Zero;
+		ImGui::SameLine();
+		ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
+		ImGui::Checkbox(ICON_LC_WAYPOINTS, &myRenderMobPath);
+		ImGui::PopFont();
+		ImGui::SetItemTooltip("Show mob path");
+
+		if (ImGui::Button("Path find smooth"))
+		{
+
+			if (myNavmesh)
+			{
+				const std::vector<Tga::Vector3f> smoothPath = myNavmesh->PathfindFunneled(startPos, endPos);
+				for (Object* enemy : myEnemies)
+				{
+					if (enemy != nullptr)
+					{
+						enemy->GetTransform().SetPosition(startPos);
+						MakeEnemyPathFind(enemy, smoothPath);
+					}
+				}
+
+			}
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Set end pos to player position"))
+		{
+			endPos = myData.player->GetTransform().GetPosition();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Set start pos to player position"))
+		{
+			startPos = myData.player->GetTransform().GetPosition();
+		}
+
+		static Object* currentInspection = nullptr;
+		static int currentIndex = 0;
+		static std::string currentZombieName =/* "Zombie #" + */std::to_string(currentIndex);
+		static std::string zombieInfo = "";
+		static std::string selectedZombie = "";
+		if (ImGui::BeginCombo("Select zombie", currentZombieName.c_str()))
+		{
+			for (int enemyIndex = 0; enemyIndex < ENEMY_MAX_TOTAL_AMOUNT; ++enemyIndex)
+			{
+				const bool is_selected = (currentIndex == enemyIndex);
+
+				if (myEnemies[enemyIndex]->CheckIfActive())
+				{
+					zombieInfo = std::to_string(enemyIndex) + " - active";
+				}
+				else
+				{
+					zombieInfo = std::to_string(enemyIndex) + " - not active";
+				}
+
+				if (ImGui::Selectable(zombieInfo.c_str(), is_selected))
+				{
+					currentIndex = enemyIndex;
+					currentZombieName = std::to_string(currentIndex);
+					currentInspection = myEnemies[currentIndex];
+					selectedZombie = "Zombie " + currentZombieName;
+				}
+			}
+			ImGui::EndCombo();
+		}
+
+		if (currentInspection != nullptr)
+		{
+			ImGui::Text(selectedZombie.c_str());
+			if (ImGui::Button("Toggle active"))
+			{
+				const bool state = currentInspection->CheckIfActive();
+				currentInspection->SetActive(!state);
+			}
+			if (currentInspection->CheckIfActive())
+			{
+				if (ImGui::Button("Kill"))
+				{
+					CommonController* const controller = currentInspection->GetComponent<CommonController>();
+					if (controller->GetCurrentStateId() != CommonState::Death)
+					{
+						controller->QueueNextState(CommonState::Death);
+					}
+				}
+			}
+			const Tga::Vector3f& pos = currentInspection->GetTransform().GetPosition();
+			ImGui::Text("X: %i, Y: %i, Z: %i", static_cast<int>(pos.x), static_cast<int>(pos.y), static_cast<int>(pos.z));
+			if (ImGui::Button("Inspect"))
+			{
+				CameraManager* cameraManager = Locator::GetCameraManager();
+
+				if (cameraManager != nullptr)
+				{
+					CameraType camType = cameraManager->GetActiveCameraType();
+					if (camType != CameraType::Free)
+					{
+						cameraManager->SwitchCamera();
+					}
+					Tga::Camera& camera = cameraManager->GetActiveCamera();
+
+					camera.GetTransform().SetPosition(currentInspection->GetTransform().GetPosition());
+				}
+			}
+
+			ImGui::Text("Animation Debug");
+			AnimatedModelComponent* animatedModel = currentInspection->GetComponent<AnimatedModelComponent>();
+
+			debugText = "current animation: " + std::string(animatedModel->GetCurrentAnimationId().GetString());
+			ImGui::Text(debugText.c_str());
+			static float animationSpeed = 1.f;
+			ImGui::PushItemWidth(50.f);
+			if (ImGui::DragFloat("animation speed", &animationSpeed, 0.01f, 0.1f, 3.f, "%.2f"))
+			{
+				animatedModel->SetTimeScale(animationSpeed);
+			}
+
+
+			ImGui::Text("Ability Debug");
+			ImGui::SetItemTooltip("This does not save the data, only for play test");
+			CommonController* controller = currentInspection->GetComponent<CommonController>();
+
+			auto& data = controller->AccessData();
+
+			ImGui::DragInt("Set Damage", &data.damage, 1, 1, 100);
+			ImGui::DragFloat("Set Top Sprint Speed", &data.sprintSpeed, 1.f, 100.f, 10000.f);
+			ImGui::DragFloat("Set Top Wander Speed", &data.wanderSpeed, 1.f, 100.f, 10000.f);
+			ImGui::DragFloat("Set Acceleration Force", &data.force, 1.f, 100.f, 10000.f);
+
+			if (ImGui::Button("Give these ability and animation settings for all"))
+			{
+				for (auto enemy : myEnemies)
+				{
+					CommonController* commonController = enemy->GetComponent<CommonController>();
+
+					auto& otherData = commonController->AccessData();
+					otherData.damage = data.damage;
+					otherData.sprintSpeed = data.sprintSpeed;
+					otherData.wanderSpeed = data.wanderSpeed;
+					otherData.force = data.force;
+
+					auto anim = enemy->GetComponent<AnimatedModelComponent>();
+					anim->SetTimeScale(animationSpeed);
+				}
+			}
+		}
+	}
+	ImGui::Separator();
+}
+
+void Forge::AIDirector::MiniMapDebug(std::string& debugText)
+{
+	// MINIMAP DEBUG
+	ImGui::Separator();
+	ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
+	ImGui::Checkbox(ICON_LC_GRID_3X3, &myGridDebug);
+	ImGui::PopFont();
+	ImGui::SetItemTooltip("Debug World Grid");
+
+	if (myGridDebug && myInitialized)
+	{
+		ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
+		ImGui::Checkbox(ICON_LC_PENCIL_LINE, &myRenderDebug);
+		ImGui::PopFont();
+		ImGui::SetItemTooltip("Draw debug lines");
+
+		//DRAW DEBUGLINES IN WORLD
+		if (myRenderDebug)
+		{
+			ImGui::SameLine();
+			ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
+			ImGui::Checkbox(ICON_LC_TRIANGLE, &myDrawFrustumDebug);
+			ImGui::PopFont();
+			ImGui::SetItemTooltip("Show view frustum in world");
+			// same line all the possible debug draws, and divide the already existing ones.
+		}
+		auto getGridColor = [](CellStatus aStatus) -> std::array<int, 4>
+			{
+				auto c = GRID_COLORS[static_cast<int>(aStatus)];
+				return { static_cast<int>(c.r * 255.f),
+					static_cast<int>(c.g * 255.f),
+					static_cast<int>(c.b * 255.f),
+					static_cast<int>(c.a * 255.f) };
+
+			};
+
+		auto displayButtonWithColor = [](const char* text, ImU32 col, bool& aResult)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Button, col);
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col);
+				ImGui::PushStyleColor(ImGuiCol_ButtonActive, col);
+				if (ImGui::Button(text)) { aResult = !aResult; }
+				ImGui::PopStyleColor(3);
+			};
+
+		auto buttonCol = getGridColor(CellStatus::OtherPath);
+		static bool showOtherPath = true;
+		displayButtonWithColor("Other Path", IM_COL32(buttonCol[0], buttonCol[1], buttonCol[2], buttonCol[3]), showOtherPath);
+
+		ImGui::SameLine();
+		buttonCol = getGridColor(CellStatus::MainPath);
+		static bool showMainPath = true;
+		displayButtonWithColor("Main Path", IM_COL32(buttonCol[0], buttonCol[1], buttonCol[2], buttonCol[3]), showMainPath);
+
+		ImGui::SameLine();
+		buttonCol = getGridColor(CellStatus::ThreatZone);
+		static bool showThreatZone = true;
+		displayButtonWithColor("Threat Zone", IM_COL32(buttonCol[0], buttonCol[1], buttonCol[2], buttonCol[3]), showThreatZone);
+
+		ImGui::SameLine();
+		buttonCol = getGridColor(CellStatus::PlayerSpawnZone);
+		static bool showDecompress = false;
+		ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
+		displayButtonWithColor("Show Decompress", IM_COL32(buttonCol[0], buttonCol[1], buttonCol[2], buttonCol[3]), showDecompress);
+		ImGui::PopStyleColor(1);
+
+		static bool showActiveArea = false;
+		displayButtonWithColor("A", IM_COL32(0, 255, 255, 255), showActiveArea);
+
+		ImGui::SameLine();
+		ImGui::Checkbox("Player active area", &showActiveArea);
+		ImGui::SameLine();
+		static bool showActiveFrustum = false;
+		displayButtonWithColor("F", IM_COL32(127, 0, 255, 255), showActiveFrustum);
+		ImGui::SameLine();
+		ImGui::Checkbox("In frustum", &showActiveFrustum);
+
+		ImGui::SameLine();
+		static bool showPossibleHordeSpawn = false;
+		ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
+		displayButtonWithColor("S", IM_COL32(255, 255, 255, 255), showPossibleHordeSpawn);
+		ImGui::PopStyleColor(1);
+		ImGui::SameLine();
+		ImGui::Checkbox("Potential Horde Spawn", &showPossibleHordeSpawn);
+		ImDrawList* const drawList = ImGui::GetWindowDrawList();
+
+		// Background
+		ImGui::BeginChild("World Grid", ImVec2(0, 0), true);
+		ImVec2 canvasP0 = ImGui::GetCursorScreenPos();
+		ImVec2 canvasSize = ImGui::GetContentRegionAvail();
+		if (canvasSize.x < 50) canvasSize.x = 50;
+		if (canvasSize.y < 50) canvasSize.y = 50;
+
+		ImVec2 canvasP1 = ImVec2(canvasP0.x + canvasSize.x,
+			canvasP0.y + canvasSize.y);
+		drawList->PushClipRect(canvasP0, canvasP1, true);
+		drawList->AddRectFilled(canvasP0, canvasP1,
+			IM_COL32(50, 50, 50, 255));
+		drawList->AddRect(canvasP0, canvasP1,
+			IM_COL32(255, 255, 255, 255));
+
+		// Grid
+		const float gridStepX = canvasSize.x / static_cast<float>(myAmountOfColumns);
+		const float gridStepY = canvasSize.y / static_cast<float>(myAmountOfRows);
+		const float worldWidth = myLargestMapPosition.x - mySmallestMapPosition.x;
+		const float worldHeight = myLargestMapPosition.z - mySmallestMapPosition.z;
+		const float scaleX = canvasSize.x / worldWidth;
+		const float scaleY = canvasSize.y / worldHeight;
+		const float scale = std::min(scaleX, scaleY);
+		const float offsetX = canvasP0.x + (canvasSize.x - worldWidth * scale) * 0.5f;
+		const float offsetY = canvasP0.y + (canvasSize.y - worldHeight * scale) * 0.5f;
+
+		for (float x = 0; x < canvasSize.x; x += gridStepX)
+		{
+			drawList->AddLine(
+				ImVec2(canvasP0.x + x, canvasP0.y),
+				ImVec2(canvasP0.x + x, canvasP1.y),
+				IM_COL32(200, 200, 200, 40));
+		}
+
+		for (float y = 0; y < canvasSize.y; y += gridStepY)
+		{
+			drawList->AddLine(
+				ImVec2(canvasP0.x, canvasP0.y + y),
+				ImVec2(canvasP1.x, canvasP0.y + y),
+				IM_COL32(200, 200, 200, 40));
+		}
+
+
+		auto gridPosFromIndex = [this, canvasP0, canvasP1, gridStepX, gridStepY](const int index) ->ImVec2
+			{
+				const int col = index % myAmountOfColumns;
+				const int row = index / myAmountOfColumns;
+				const int flippedRow = (myAmountOfRows - 1) - row;
+				const float x = canvasP0.x + col * gridStepX + gridStepX * 0.5f;
+				const float y = canvasP0.y + flippedRow * gridStepY + gridStepY * 0.5f;
+				return { x, y };
+			};
+
+
+		auto getGridPos = [this, gridPosFromIndex, canvasP0, canvasP1, gridStepX, gridStepY, offsetX, offsetY, scale](const Tga::Vector3f& pos) ->ImVec2
+			{
+				const int cellIndex = GetCellIndexFromPosition(pos);
+				const Tga::Vector3f cellCenter = GetXZPositionFromIndex(cellIndex);
+				const float xDelta = pos.x - cellCenter.x;
+				const float zDelta = pos.z - cellCenter.z;
+				const float xOffset = (xDelta / myGridCellSideLength) * gridStepX;
+				const float yOffset = (zDelta / myGridCellSideLength) * gridStepY;
+				ImVec2 cellPos = gridPosFromIndex(cellIndex);
+				return { cellPos.x + xOffset, cellPos.y - yOffset };
+
+			};
+
+		std::vector<ImVec2> gridCells;
+		gridCells.reserve(50);
+		if (showOtherPath)
+		{
+			for (auto& cell : myGrid)
+			{
+				if (cell.status != CellStatus::Invalid)
+				{
+					gridCells.emplace_back(gridPosFromIndex(cell.id));
+				}
+			}
+			for (auto& c : gridCells)
+			{
+				const auto col = getGridColor(CellStatus::OtherPath);
+				const ImVec2 min = c - ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);
+				const ImVec2 max = c + ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);;
+				drawList->AddRectFilled(min, max, IM_COL32(col[0], col[1], col[2], col[3]));
+			}
+		}
+		gridCells.clear();
+
+		if (showMainPath)
+		{
+			for (auto& cell : myGrid)
+			{
+				if (cell.status == CellStatus::MainPath)
+				{
+					gridCells.emplace_back(gridPosFromIndex(cell.id));
+				}
+			}
+			for (auto& c : gridCells)
+			{
+				const auto col = getGridColor(CellStatus::MainPath);
+				const ImVec2 min = c - ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);
+				const ImVec2 max = c + ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);;
+				drawList->AddRectFilled(min, max, IM_COL32(col[0], col[1], col[2], col[3]));
+			}
+		}
+
+
+		float textSize = 0.f;
+		std::vector<std::pair<ImVec2, SpecialEnemy>> posAndBoss;
+		posAndBoss.reserve(myThreatZones.size());
+		if (showThreatZone)
+		{
+			for (auto& threatZone : myThreatZones)
+			{
+				const char* bossName = magic_enum::enum_name(threatZone.special).data();
+				textSize = ImGui::CalcTextSize(bossName).x;
+				const ImVec2 pos = gridPosFromIndex(threatZone.cellId);
+				const auto col = getGridColor(CellStatus::ThreatZone);
+				const ImVec2 min = pos - ImVec2(gridStepX * 3.f, gridStepY * 2.5f);
+				const ImVec2 max = pos + ImVec2(gridStepX * 3.6f, gridStepY * 2.5f);;
+				drawList->AddRectFilled(min, max, IM_COL32(col[0], col[1], col[2], col[3]));
+				
+				drawList->AddText(nullptr, 25.f, min, IM_COL32(255, 255, 255, 255), bossName);
+			}
+		}
+
+		gridCells.clear();
+
+		if (showDecompress)
+		{
+			for (auto& cell : myGrid)
+			{
+				if (cell.status == CellStatus::DecompressZone)
+				{
+					gridCells.emplace_back(gridPosFromIndex(cell.id));
+				}
+			}
+			for (auto& c : gridCells)
+			{
+				const ImVec2 min = c - ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);
+				const ImVec2 max = c + ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);;
+				drawList->AddRectFilled(min, max, IM_COL32(255, 255, 255, 255));
+			}
+		}
+
+		if (showActiveArea)
+		{
+			gridCells.clear();
+			for (auto& id : myActiveArea.GetCells())
+			{
+				const ImVec2 c = gridPosFromIndex(id);
+				const ImVec2 min = c - ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);
+				const ImVec2 max = c + ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);;
+				drawList->AddRectFilled(min, max, IM_COL32(0, 255, 255, 255));
+			}
+		}
+
+		if (showActiveFrustum)
+		{
+			gridCells.clear();
+			for (auto& id : myCellIdsInFrustum.GetCells())
+			{
+				const ImVec2 c = gridPosFromIndex(id);
+				const ImVec2 min = c - ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);
+				const ImVec2 max = c + ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);;
+				drawList->AddRectFilled(min, max, IM_COL32(127, 0, 255, 255));
+			}
+		}
+
+		if (showPossibleHordeSpawn)
+		{
+			gridCells.clear();
+
+			int spawnzone = 0;
+			const int zoneAmount = static_cast<int>(myPossibleHordeSpawnZones.GetCells().size());
+			for (auto& id : myPossibleHordeSpawnZones.GetCells())
+			{
+				const float blend = static_cast<float>(spawnzone) / static_cast<float>(zoneAmount);
+				const int color = static_cast<int>(FMath::Lerp(255.f, 0.f, blend));
+				const ImVec2 c = gridPosFromIndex(id);
+				drawList->AddCircleFilled(c, 18.0f, IM_COL32(color, color, color, 255));
+				spawnzone++;
+			}
+		}
+
+		std::vector<std::pair<ImVec2, CommonState>> enemyDots;
+		enemyDots.reserve(ENEMY_MAX_TOTAL_AMOUNT);
+		for (auto enemy : myEnemies)
+		{
+			if (enemy && enemy->CheckIfActive())
+			{
+				const Tga::Vector3f& pos = enemy->GetTransform().GetPosition();
+				auto controller = enemy->GetComponent<CommonController>();
+				if (controller)
+				{
+					const CommonState state = controller->GetCurrentStateId();
+					enemyDots.emplace_back(getGridPos(pos), state);
+				}
+			}
+		}
+
+		ImU32 stateColor;
+		for (auto& p : enemyDots)
+		{
+			if (p.second == CommonState::Death)
+			{
+				stateColor = (((ImU32)(255) << IM_COL32_A_SHIFT) | ((ImU32)(0) << IM_COL32_B_SHIFT) | ((ImU32)(0) << IM_COL32_G_SHIFT) | ((ImU32)(0) << IM_COL32_R_SHIFT));
+			}
+			else if (p.second != CommonState::Idle && p.second != CommonState::Wander)
+			{
+				stateColor = (((ImU32)(255) << IM_COL32_A_SHIFT) | ((ImU32)(127) << IM_COL32_B_SHIFT) | ((ImU32)(0) << IM_COL32_G_SHIFT) | ((ImU32)(255) << IM_COL32_R_SHIFT));
+			}
+			else
+			{
+				stateColor = (((ImU32)(255) << IM_COL32_A_SHIFT) | ((ImU32)(200) << IM_COL32_B_SHIFT) | ((ImU32)(200) << IM_COL32_G_SHIFT) | ((ImU32)(200) << IM_COL32_R_SHIFT));
+			}
+			drawList->AddCircleFilled(p.first, 5.0f, IM_COL32(0, 0, 0, 255));
+			drawList->AddCircleFilled(p.first, 4.0f, stateColor);
+		}
+
+		// DRAW PLAYER
+		Tga::Vector3f pos = myData.player->GetTransform().GetPosition();
+		drawList->AddCircleFilled(getGridPos(pos), 6.0f, IM_COL32(255, 255, 255, 255));
+		Tga::Vector3f aheadOfPlayer = pos + myData.player->GetTransform().GetForward() * 600.f;
+		drawList->AddLine(getGridPos(pos), getGridPos(aheadOfPlayer), IM_COL32(255, 255, 255, 255), 3.f);
+
+		//DRAW DEBUG TEXT
+		constexpr  float margin = 15.f;
+		debugText = "Current Phase: " + std::string(magic_enum::enum_name(myData.currentPhase).data());
+	textSize = ImGui::CalcTextSize(debugText.c_str()).x;
+		drawList->AddText(canvasP0 + ImVec2(canvasSize.x - (textSize + margin), gridStepY / 2.f), IM_COL32(255, 255, 255, 255), debugText.c_str());
+
+		debugText = "Build up timer: " + std::to_string(myData.buildUpTimer);
+		textSize = ImGui::CalcTextSize(debugText.c_str()).x;
+		drawList->AddText(canvasP0 + ImVec2(canvasSize.x - (textSize + margin), gridStepY * 2.f), IM_COL32(255, 255, 255, 255), debugText.c_str());
+
+		debugText = "Horde spawn timer: " + std::to_string(myData.hordeTimer);
+		textSize = ImGui::CalcTextSize(debugText.c_str()).x;
+		drawList->AddText(canvasP0 + ImVec2(canvasSize.x - (textSize + margin), gridStepY * 4.f), IM_COL32(255, 255, 255, 255), debugText.c_str());
+
+		debugText = "Next horde size: " + std::to_string(myData.nextHordeMax);
+		textSize = ImGui::CalcTextSize(debugText.c_str()).x;
+		drawList->AddText(canvasP0 + ImVec2(canvasSize.x - (textSize + margin), gridStepY * 6.f), IM_COL32(255, 255, 255, 255), debugText.c_str());
+
+		debugText = "Grid size: " + std::to_string(myGrid.size());
+		textSize = ImGui::CalcTextSize(debugText.c_str()).x;
+		drawList->AddText(canvasP0 + ImVec2(canvasSize.x - (textSize + margin), gridStepY * 8.f), IM_COL32(255, 255, 255, 255), debugText.c_str());
+
+		debugText = "Active enemies: " + std::to_string(myData.totalActiveEnemies) + " / " + std::to_string(ENEMY_MAX_SPAWN);
+		textSize = ImGui::CalcTextSize(debugText.c_str()).x;
+		drawList->AddText(canvasP0 + ImVec2(canvasSize.x - (textSize + margin), gridStepY * 10.f), IM_COL32(255, 255, 255, 255), debugText.c_str());
+
+		ImGui::InvisibleButton("canvas", canvasSize);
+		drawList->PopClipRect();
+		ImGui::EndChild();
+	}
+}
+
+
 void Forge::AIDirector::AddDebugMenu()
 {
 	if (debugId != UINT16_MAX && ourHasDebugMenu == false)
@@ -101,523 +736,12 @@ void Forge::AIDirector::AddDebugMenu()
 		debugId = Locator::GetDebugTool()->AddFunc("AI Director", [this]()
 			{
 				if (!myInitialized) { return; }
-				ImGui::ShowDemoWindow();
 
 				static std::string debugText;
-
-
-				// PLAYER DEBUG
-				ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
-				ImGui::Checkbox(ICON_LC_PERSON_STANDING, &myPlayerDebug);
-				ImGui::PopFont();
-				ImGui::SetItemTooltip("Player Debug Data");
-
-				if (myPlayerDebug)
-				{
-
-					ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
-					ImGui::Text(ICON_LC_TARGET);
-					ImGui::PopFont();
-					ImGui::SameLine();
-					ImGui::DragFloat("Active Area Radius", &myActiveAreaRadius, 100.f, myGridCellHalfLength, 100000.f, "%.1f");
-
-					ImGui::Text("Player Stress Data");
-					float average = 0.f;
-					auto& stressRegisters = myData.latestPlayerStress.GetValues();
-					int valueAmount = static_cast<int>(stressRegisters.size());
-					int currentStressIndex = (static_cast<int>(CircularBuffer::MAX_SIZE) - static_cast<int>(myData.latestPlayerStress.GetCurrentIndex())) - 1;
-					static const Tga::Vector3f green = { 0.f, 1.f, 0.f };
-					static const Tga::Vector3f red = { 1.f, 0.f, 0.f };
-					for (int s = 0; s < valueAmount; ++s)
-					{
-						average += stressRegisters[s];
-					}
-					average /= static_cast<float>(valueAmount);
-					const Tga::Vector3f averageBlend = FMath::Lerp(green, red, average);
-					const Tga::Vector3f currentBlend = FMath::Lerp(green, red, myData.playerStress);
-
-
-					ImGui::PushStyleColor(ImGuiCol_FrameBg, { currentBlend.x * 0.4f, currentBlend.y * 0.4f, currentBlend.z * 0.4f, 1.f });
-					ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, { currentBlend.x * 0.6f, currentBlend.y * 0.6f, currentBlend.z * 0.6f, 1.f });
-					ImGui::PushStyleColor(ImGuiCol_FrameBgActive, { currentBlend.x * 0.8f, currentBlend.y * 0.8f, currentBlend.z * 0.8f, 1.f });
-					ImGui::PushStyleColor(ImGuiCol_SliderGrab, { currentBlend.x, currentBlend.y, currentBlend.z, 1.f });
-					float playerStress = myData.playerStress;
-					ImGui::VSliderFloat("current stress", ImVec2(18, 80), &playerStress, 0.0f, 1.0f, "");
-					ImGui::PopStyleColor(4);
-
-					ImGui::SameLine();
-					char overlay[64];
-					sprintf_s(overlay, "avg. last 10 seconds  %.*f", 2, average);
-
-					ImGui::PushStyleColor(ImGuiCol_PlotLines, { averageBlend.x, averageBlend.y, averageBlend.z, 1.f });
-					ImGui::PlotLines("average stress", myData.latestPlayerStress.GetValues().data(), valueAmount, currentStressIndex, overlay, 0.0f, 1.0f, ImVec2(0, 80.0f));
-					ImGui::SameLine();
-					ImGui::TextColored({ green.x, green.y, green.z, 1.f }, "0 = min");
-					ImGui::SameLine();
-					ImGui::TextColored({ averageBlend.x, averageBlend.y, averageBlend.z, 1.f }, " << intensity >>");
-					ImGui::SameLine();
-					ImGui::TextColored({ red.x, red.y, red.z, 1.f }, "1 = max");
-					ImGui::PopStyleColor(1);
-				}
-
-				ImGui::Separator();
-				ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
-				ImGui::Checkbox(ICON_LC_SKULL, &myEnemiesDebug);
-				ImGui::PopFont();
-				ImGui::SetItemTooltip("Open Enemy Debug");
-
-				// ENEMIES DEBUG
-				if (myEnemiesDebug)
-				{
-					static Tga::Vector3f startPos = Tga::Vector3f::Zero;
-					static Tga::Vector3f endPos = Tga::Vector3f::Zero;
-
-					ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
-					ImGui::Checkbox(ICON_LC_WAYPOINTS, &myRenderMobPath);
-					ImGui::PopFont();
-					ImGui::SetItemTooltip("Show mob path");
-
-					if (ImGui::Button("Path find smooth"))
-					{
-
-						if (myNavmesh)
-						{
-							const std::vector<Tga::Vector3f> smoothPath = myNavmesh->PathfindFunneled(startPos, endPos);
-							for (Object* enemy : myEnemies)
-							{
-								if (enemy != nullptr)
-								{
-									enemy->GetTransform().SetPosition(startPos);
-									MakeEnemyPathFind(enemy, smoothPath);
-								}
-							}
-
-						}
-					}
-					ImGui::SameLine();
-					if (ImGui::Button("Set end pos to player position"))
-					{
-						endPos = myData.player->GetTransform().GetPosition();
-					}
-					ImGui::SameLine();
-					if (ImGui::Button("Set start pos to player position"))
-					{
-						startPos = myData.player->GetTransform().GetPosition();
-					}
-
-					static Object* currentInspection = nullptr;
-					static int currentIndex = 0;
-					static std::string currentZombieName =/* "Zombie #" + */std::to_string(currentIndex);
-					static std::string zombieInfo = "";
-					static std::string selectedZombie = "";
-					if (ImGui::BeginCombo("Select zombie", currentZombieName.c_str()))
-					{
-						for (int enemyIndex = 0; enemyIndex < ENEMY_MAX_TOTAL_AMOUNT; ++enemyIndex)
-						{
-							const bool is_selected = (currentIndex == enemyIndex);
-
-							if (myEnemies[enemyIndex]->CheckIfActive())
-							{
-								zombieInfo = std::to_string(enemyIndex) + " - active";
-							}
-							else
-							{
-								zombieInfo = std::to_string(enemyIndex) + " - not active";
-							}
-
-							if (ImGui::Selectable(zombieInfo.c_str(), is_selected))
-							{
-								currentIndex = enemyIndex;
-								currentZombieName = std::to_string(currentIndex);
-								currentInspection = myEnemies[currentIndex];
-								selectedZombie = "Zombie " + currentZombieName;
-							}
-						}
-						ImGui::EndCombo();
-					}
-
-					if (currentInspection != nullptr)
-					{
-						ImGui::Text(selectedZombie.c_str());
-						if (ImGui::Button("Toggle active"))
-						{
-							const bool state = currentInspection->CheckIfActive();
-							currentInspection->SetActive(!state);
-						}
-						if (currentInspection->CheckIfActive())
-						{
-							if (ImGui::Button("Kill"))
-							{
-								CommonController* const controller = currentInspection->GetComponent<CommonController>();
-								if (controller->GetCurrentStateId() != CommonState::Death)
-								{
-									controller->QueueNextState(CommonState::Death);
-								}
-							}
-						}
-						const Tga::Vector3f& pos = currentInspection->GetTransform().GetPosition();
-						ImGui::Text("X: %i, Y: %i, Z: %i", static_cast<int>(pos.x), static_cast<int>(pos.y), static_cast<int>(pos.z));
-						if (ImGui::Button("Inspect"))
-						{
-							CameraManager* cameraManager = Locator::GetCameraManager();
-
-							if (cameraManager != nullptr)
-							{
-								CameraType camType = cameraManager->GetActiveCameraType();
-								if (camType != CameraType::Free)
-								{
-									cameraManager->SwitchCamera();
-								}
-								Tga::Camera& camera = cameraManager->GetActiveCamera();
-
-								camera.GetTransform().SetPosition(currentInspection->GetTransform().GetPosition());
-							}
-						}
-
-						ImGui::Text("Animation Debug");
-						AnimatedModelComponent* animatedModel = currentInspection->GetComponent<AnimatedModelComponent>();
-
-						debugText = "current animation: " + std::string(animatedModel->GetCurrentAnimationId().GetString());
-						ImGui::Text(debugText.c_str());
-						static float animationSpeed = 1.f;
-						ImGui::PushItemWidth(50.f);
-						if (ImGui::DragFloat("animation speed", &animationSpeed, 0.01f, 0.1f, 3.f, "%.2f"))
-						{
-							animatedModel->SetTimeScale(animationSpeed);
-						}
-
-
-						ImGui::Text("Ability Debug");
-						ImGui::SetItemTooltip("This does not save the data, only for play test");
-						CommonController* controller = currentInspection->GetComponent<CommonController>();
-
-						auto& data = controller->AccessData();
-
-						ImGui::DragInt("Set Damage", &data.damage, 1, 1, 100);
-						ImGui::DragFloat("Set Top Sprint Speed", &data.sprintSpeed, 1.f, 100.f, 10000.f);
-						ImGui::DragFloat("Set Top Wander Speed", &data.wanderSpeed, 1.f, 100.f, 10000.f);
-						ImGui::DragFloat("Set Acceleration Force", &data.force, 1.f, 100.f, 10000.f);
-
-						if (ImGui::Button("Give these ability and animation settings for all"))
-						{
-							for (auto enemy : myEnemies)
-							{
-								CommonController* commonController = enemy->GetComponent<CommonController>();
-
-								auto& otherData = commonController->AccessData();
-								otherData.damage = data.damage;
-								otherData.sprintSpeed = data.sprintSpeed;
-								otherData.wanderSpeed = data.wanderSpeed;
-								otherData.force = data.force;
-
-								auto anim = enemy->GetComponent<AnimatedModelComponent>();
-								anim->SetTimeScale(animationSpeed);
-							}
-						}
-					}
-				}
-				ImGui::Separator();
-				ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
-				ImGui::Checkbox(ICON_LC_PENCIL_LINE, &myRenderDebug);
-				ImGui::PopFont();
-				ImGui::SetItemTooltip("Draw Debug Data");
-
-				//DRAW DEBUGLINES IN WORLD
-				if (myRenderDebug)
-				{
-					ImGui::SameLine();
-					ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
-					ImGui::Checkbox(ICON_LC_TRIANGLE, &myDrawFrustumDebug);
-					ImGui::PopFont();
-					ImGui::SetItemTooltip("Show view frustum");
-					// same line all the possible debug draws, and divide the already existing ones.
-				}
-
-				// MINIMAP DEBUG
-				ImGui::Separator();
-				ImGui::PushFont(Tga::ImGuiInterface::GetIconFontLarge());
-				ImGui::Checkbox(ICON_LC_GRID_3X3, &myGridDebug);
-				ImGui::PopFont();
-				ImGui::SetItemTooltip("Debug World Grid");
-
-				if (myGridDebug && myInitialized)
-				{
-					auto getGridColor = [](CellStatus aStatus) -> std::array<int, 4>
-						{
-							auto c = GRID_COLORS[static_cast<int>(aStatus)];
-							return { static_cast<int>(c.r * 255.f),
-								static_cast<int>(c.g * 255.f),
-								static_cast<int>(c.b * 255.f),
-								static_cast<int>(c.a * 255.f) };
-
-						};
-
-					auto displayButtonWithColor = [](const char* text, ImU32 col)
-						{
-							ImGui::PushStyleColor(ImGuiCol_Button, col);
-							ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col);
-							ImGui::PushStyleColor(ImGuiCol_ButtonActive, col);
-							ImGui::Button(text);
-							ImGui::PopStyleColor(3);
-						};
-
-					auto buttonCol = getGridColor(CellStatus::OtherPath);
-					displayButtonWithColor("Other Path", IM_COL32(buttonCol[0], buttonCol[1], buttonCol[2], buttonCol[3]));
-
-					ImGui::SameLine();
-					buttonCol = getGridColor(CellStatus::MainPath);
-					displayButtonWithColor("Main Path", IM_COL32(buttonCol[0], buttonCol[1], buttonCol[2], buttonCol[3]));
-
-					ImGui::SameLine();
-					buttonCol = getGridColor(CellStatus::ThreatZone);
-					displayButtonWithColor("Threat Zone", IM_COL32(buttonCol[0], buttonCol[1], buttonCol[2], buttonCol[3]));
-					static bool showActiveArea = false;
-					displayButtonWithColor("A", IM_COL32(0, 255, 255, 255));
-					ImGui::SameLine();
-					ImGui::Checkbox("Player active area", &showActiveArea);
-					ImGui::SameLine();
-					displayButtonWithColor("F", IM_COL32(127, 0, 255, 255));
-					ImGui::SameLine();
-					static bool showActiveFrustum = false;
-					ImGui::Checkbox("In frustum", &showActiveFrustum);
-
-					ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
-					displayButtonWithColor("S", IM_COL32(255, 255, 255, 255));
-					ImGui::PopStyleColor(1);
-					ImGui::SameLine();
-					static bool showPossibleHordeSpawn = false;
-					ImGui::Checkbox("Potential Horde Spawn", &showPossibleHordeSpawn);
-					ImDrawList* const drawList = ImGui::GetWindowDrawList();
-
-
-
-
-
-					// Background
-
-
-					ImGui::BeginChild("World Grid", ImVec2(0, 0), true);
-					ImVec2 canvasP0 = ImGui::GetCursorScreenPos();
-					ImVec2 canvasSize = ImGui::GetContentRegionAvail();
-					if (canvasSize.x < 50) canvasSize.x = 50;
-					if (canvasSize.y < 50) canvasSize.y = 50;
-
-					ImVec2 canvasP1 = ImVec2(canvasP0.x + canvasSize.x,
-						canvasP0.y + canvasSize.y);
-					drawList->PushClipRect(canvasP0, canvasP1, true);
-					drawList->AddRectFilled(canvasP0, canvasP1,
-						IM_COL32(50, 50, 50, 255));
-					drawList->AddRect(canvasP0, canvasP1,
-						IM_COL32(255, 255, 255, 255));
-
-					// Grid
-					const float gridStepX = canvasSize.x / static_cast<float>(myAmountOfColumns);
-					const float gridStepY = canvasSize.y / static_cast<float>(myAmountOfRows);
-					const float worldWidth = myLargestPosition.x - mySmallestNodePosition.x;
-					const float worldHeight = myLargestPosition.z - mySmallestNodePosition.z;
-					const float scaleX = canvasSize.x / worldWidth;
-					const float scaleY = canvasSize.y / worldHeight;
-					const float scale = std::min(scaleX, scaleY);
-					const float offsetX = canvasP0.x + (canvasSize.x - worldWidth * scale) * 0.5f;
-					const float offsetY = canvasP0.y + (canvasSize.y - worldHeight * scale) * 0.5f;
-
-					for (float x = 0; x < canvasSize.x; x += gridStepX)
-					{
-						drawList->AddLine(
-							ImVec2(canvasP0.x + x, canvasP0.y),
-							ImVec2(canvasP0.x + x, canvasP1.y),
-							IM_COL32(200, 200, 200, 40));
-					}
-
-					for (float y = 0; y < canvasSize.y; y += gridStepY)
-					{
-						drawList->AddLine(
-							ImVec2(canvasP0.x, canvasP0.y + y),
-							ImVec2(canvasP1.x, canvasP0.y + y),
-							IM_COL32(200, 200, 200, 40));
-					}
-
-
-					auto gridPosFromIndex = [this, canvasP0, canvasP1, gridStepX, gridStepY](const int index) ->ImVec2
-						{
-							const int col = index % myAmountOfColumns;
-							const int row = index / myAmountOfColumns;
-							const int flippedRow = (myAmountOfRows - 1) - row;
-							const float x = canvasP0.x + col * gridStepX + gridStepX * 0.5f;
-							const float y = canvasP0.y + flippedRow * gridStepY + gridStepY * 0.5f;
-							return { x, y };
-						};
-
-
-					auto getGridPos = [this, gridPosFromIndex, canvasP0, canvasP1, gridStepX, gridStepY, offsetX, offsetY, scale](const Tga::Vector3f& pos) ->ImVec2
-						{
-							const int cellIndex = GetCellIndexFromPosition(pos);
-							const Tga::Vector3f cellCenter = /*myCellCenters[cellIndex]*/GetXZPositionFromIndex(cellIndex);
-							const float xDelta = pos.x - cellCenter.x;
-							const float zDelta = pos.z - cellCenter.z;
-							const float xOffset = (xDelta / myGridCellSideLength) * gridStepX;
-							const float yOffset = (zDelta / myGridCellSideLength) * gridStepY;
-							ImVec2 cellPos = gridPosFromIndex(cellIndex);
-							return { cellPos.x + xOffset, cellPos.y - yOffset };
-
-						};
-
-					std::vector<ImVec2> gridCells;
-					gridCells.reserve(50);
-
-					for (auto& cell : myGrid)
-					{
-						if (cell.status != CellStatus::Invalid)
-						{
-							gridCells.emplace_back(gridPosFromIndex(cell.id));
-						}
-					}
-					for (auto& c : gridCells)
-					{
-						const auto col = getGridColor(CellStatus::OtherPath);
-						const ImVec2 min = c - ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);
-						const ImVec2 max = c + ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);;
-						drawList->AddRectFilled(min, max, IM_COL32(col[0], col[1], col[2], col[3]));
-					}
-					gridCells.clear();
-
-					for (auto& cell : myGrid)
-					{
-						if (cell.status == CellStatus::MainPath)
-						{
-							gridCells.emplace_back(gridPosFromIndex(cell.id));
-						}
-					}
-					for (auto& c : gridCells)
-					{
-						const auto col = getGridColor(CellStatus::MainPath);
-						const ImVec2 min = c - ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);
-						const ImVec2 max = c + ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);;
-						drawList->AddRectFilled(min, max, IM_COL32(col[0], col[1], col[2], col[3]));
-					}
-
-					gridCells.clear();
-					for (auto& cell : myGrid)
-					{
-						if (cell.status == CellStatus::ThreatZone)
-						{
-							gridCells.emplace_back(gridPosFromIndex(cell.id));
-						}
-					}
-					for (auto& c : gridCells)
-					{
-						const auto col = getGridColor(CellStatus::ThreatZone);
-						const ImVec2 min = c - ImVec2(gridStepX * 1.5f, gridStepY * 1.5f);
-						const ImVec2 max = c + ImVec2(gridStepX * 1.5f, gridStepY * 1.5f);;
-						drawList->AddRectFilled(min, max, IM_COL32(col[0], col[1], col[2], col[3]));
-					}
-
-					if (showActiveArea)
-					{
-						gridCells.clear();
-						for (auto& id : myActiveArea.GetCells())
-						{
-							const ImVec2 c = gridPosFromIndex(id);
-							const ImVec2 min = c - ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);
-							const ImVec2 max = c + ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);;
-							drawList->AddRectFilled(min, max, IM_COL32(0, 255, 255, 255));
-						}
-					}
-
-					if (showActiveFrustum)
-					{
-						gridCells.clear();
-						for (auto& id : myCellIdsInFrustum.GetCells())
-						{
-							const ImVec2 c = gridPosFromIndex(id);
-							const ImVec2 min = c - ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);
-							const ImVec2 max = c + ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);;
-							drawList->AddRectFilled(min, max, IM_COL32(127, 0, 255, 255));
-						}
-					}
-
-					if (showPossibleHordeSpawn)
-					{
-						gridCells.clear();
-
-						int spawnzone = 0;
-						const int zoneAmount = static_cast<int>(myPossibleHordeSpawnZones.GetCells().size());
-						for (auto& id : myPossibleHordeSpawnZones.GetCells())
-						{
-							const float blend = static_cast<float>(spawnzone) / static_cast<float>(zoneAmount);
-
-							const int color = static_cast<int>(FMath::Lerp(255.f, 0.f, blend));
-
-							const ImVec2 c = gridPosFromIndex(id);
-							const ImVec2 min = c - ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);
-							const ImVec2 max = c + ImVec2(gridStepX * 0.5f, gridStepY * 0.5f);;
-							drawList->AddRectFilled(min, max, IM_COL32(color, color, color, 255));
-							spawnzone++;
-						}
-
-					}
-
-					std::vector<std::pair<ImVec2, CommonState>> enemyDots;
-					enemyDots.reserve(ENEMY_MAX_TOTAL_AMOUNT);
-					for (auto enemy : myEnemies)
-					{
-						if (enemy && enemy->CheckIfActive())
-						{
-							const Tga::Vector3f& pos = enemy->GetTransform().GetPosition();
-							auto controller = enemy->GetComponent<CommonController>();
-							if (controller)
-							{
-								const CommonState state = controller->GetCurrentStateId();
-								enemyDots.emplace_back(getGridPos(pos), state);
-							}
-						}
-					}
-
-					ImU32 stateColor;
-					for (auto& p : enemyDots)
-					{
-						if (p.second == CommonState::Death)
-						{
-							stateColor = (((ImU32)(255) << IM_COL32_A_SHIFT) | ((ImU32)(0) << IM_COL32_B_SHIFT) | ((ImU32)(0) << IM_COL32_G_SHIFT) | ((ImU32)(0) << IM_COL32_R_SHIFT));
-						}
-						else if (p.second != CommonState::Idle && p.second != CommonState::Wander)
-						{
-							stateColor = (((ImU32)(255) << IM_COL32_A_SHIFT) | ((ImU32)(127) << IM_COL32_B_SHIFT) | ((ImU32)(0) << IM_COL32_G_SHIFT) | ((ImU32)(255) << IM_COL32_R_SHIFT));
-						}
-						else
-						{
-							stateColor = (((ImU32)(255) << IM_COL32_A_SHIFT) | ((ImU32)(200) << IM_COL32_B_SHIFT) | ((ImU32)(200) << IM_COL32_G_SHIFT) | ((ImU32)(200) << IM_COL32_R_SHIFT));
-						}
-						drawList->AddCircleFilled(p.first, 5.0f, IM_COL32(0, 0, 0, 255));
-						drawList->AddCircleFilled(p.first, 4.0f, stateColor);
-					}
-
-					// DRAW PLAYER
-					Tga::Vector3f pos = myData.player->GetTransform().GetPosition();
-					drawList->AddCircleFilled(getGridPos(pos), 6.0f, IM_COL32(255, 255, 255, 255));
-					Tga::Vector3f aheadOfPlayer = pos + myData.player->GetTransform().GetForward() * 600.f;
-					drawList->AddLine(getGridPos(pos), getGridPos(aheadOfPlayer), IM_COL32(255, 255, 255, 255), 3.f);
-
-					//DRAW DEBUG TEXT
-					constexpr  float margin = 15.f;
-					debugText = "Tempo: " + std::string(magic_enum::enum_name(myData.currentPhase).data());
-					float textSize = ImGui::CalcTextSize(debugText.c_str()).x;
-					drawList->AddText(canvasP0 + ImVec2(canvasSize.x - (textSize + margin), gridStepY), IM_COL32(255, 255, 255, 255), debugText.c_str());
-					debugText = "Mob spawn timer: " + std::to_string(myData.mobTimer);
-					textSize = ImGui::CalcTextSize(debugText.c_str()).x;
-					drawList->AddText(canvasP0 + ImVec2(canvasSize.x - (textSize + margin), gridStepY * 2.f), IM_COL32(255, 255, 255, 255), debugText.c_str());
-					debugText = "Next mob size: " + std::to_string(myData.nextMobMax);
-					textSize = ImGui::CalcTextSize(debugText.c_str()).x;
-					drawList->AddText(canvasP0 + ImVec2(canvasSize.x - (textSize + margin), gridStepY * 3.f), IM_COL32(255, 255, 255, 255), debugText.c_str());
-
-
-					ImGui::InvisibleButton("canvas", canvasSize);
-					drawList->PopClipRect();
-					ImGui::EndChild();
-
-
-				}
-
+				SetDirectorData();
+				PlayerDebug(debugText);
+				EnemyDebug(debugText);
+				MiniMapDebug(debugText);
 
 			});
 
@@ -636,20 +760,22 @@ void Forge::AIDirector::DebugDraw()
 	//Cell draw
 	Tga::Engine& engine = *Tga::Engine::GetInstance();
 	Tga::DebugDrawer& debugDrawer = engine.GetDebugDrawer();
-	Tga::Vector3f boxDimension = { myGridCellSideLength, myGridCellSideLength, myGridCellSideLength };
+	const Tga::Vector3f boxDimension = { myGridCellSideLength, myGridCellSideLength, myGridCellSideLength };
+	const Tga::Vector3f upOffset = { 0.f, 500.f, 0.f };
 	for (int i = 0; i < myGrid.size(); ++i)
 	{
 		const CellStatus status = myGrid[i].status;
 
 		if (status != CellStatus::Invalid)
 		{
-			debugDrawer.DrawBox(GetXZPositionFromIndex(i), boxDimension, GRID_COLORS[static_cast<int>(status)]);
+			debugDrawer.DrawBox(GetXZPositionFromIndex(i) + upOffset, boxDimension, GRID_COLORS[static_cast<int>(status)]);
+			debugDrawer.DrawBox(GetXZPositionFromIndex(i) + upOffset, boxDimension / 2.f, GRID_COLORS[static_cast<int>(status)]);
 
 		}
 		if (status == CellStatus::ThreatZone)
 		{
-			debugDrawer.DrawBox(GetXZPositionFromIndex(i), boxDimension / 2.f, GRID_COLORS[static_cast<int>(status)]);
-			debugDrawer.DrawBox(GetXZPositionFromIndex(i), boxDimension / 4.f, GRID_COLORS[static_cast<int>(status)]);
+			debugDrawer.DrawBox(GetXZPositionFromIndex(i) + upOffset, boxDimension / 2.f, GRID_COLORS[static_cast<int>(status)]);
+			debugDrawer.DrawBox(GetXZPositionFromIndex(i) + upOffset, boxDimension / 4.f, GRID_COLORS[static_cast<int>(status)]);
 		}
 
 	}
@@ -661,7 +787,6 @@ void Forge::AIDirector::DebugDraw()
 
 	if (myActiveAreaDebug)
 	{
-
 		for (const int i : myActiveArea.GetCells())
 		{
 			debugDrawer.DrawBox(GetXZPositionFromIndex(i), boxDimension, { 0.f, 1.f, 0.f, 1.f });
@@ -708,7 +833,7 @@ void Forge::AIDirector::Update(const float aFixedTime)
 
 	// stress data & active enemies data
 	myData.snapshotTimer += aFixedTime;
-	if (myData.snapshotTimer > DirectorData::SNAP_SHOT_TIME)
+	if (myData.snapshotTimer > DirectorStaticData::SNAP_SHOT_TIME)
 	{
 		myData.latestPlayerStress.Add(myData.playerStress);
 
@@ -727,13 +852,13 @@ void Forge::AIDirector::Update(const float aFixedTime)
 	myData.stressTimer -= aFixedTime;
 	if (myData.stressTimer < 0.f && myData.playerStress > 0.f)
 	{
-		myData.playerStress -= DirectorData::STRESS_DOWN_TICK * aFixedTime;
+		myData.playerStress -= DirectorStaticData::STRESS_DOWN_TICK * aFixedTime;
 		myData.playerStress = std::clamp(myData.playerStress, 0.f, 1.f);
 	}
 
 	// view frustum data
 	myCellIdsInFrustum.Clear();
-	myPlayerFrustum = CalculateFrustum(myData.playerCamera->GetCamera());
+	myPlayerFrustum = CalculateFrustum(myData.playerCamera->GetCamera(), 25000.f);
 	for (auto& cell : myGrid)
 	{
 		const float distanceSquared = (GetXZPositionFromIndex(cell.id) - playerPos).LengthSqr();
@@ -749,16 +874,17 @@ void Forge::AIDirector::Update(const float aFixedTime)
 		}
 	}
 
-	UpdateActiveAreaAndSpawnZones();
-	UpdateMobSpawns(aFixedTime);
+	UpdateActiveArea(aFixedTime);
+	UpdateSpawnZones(aFixedTime);
+	UpdateHorde(aFixedTime);
 	HandleCommands(aFixedTime);
 	UpdateCurrentPhase(aFixedTime);
 }
 
 int Forge::AIDirector::GetCellIndexFromPosition(const Tga::Vector3f& aPosition)
 {
-	int tileX = static_cast<int>((ceil(aPosition.x - mySmallestNodePosition.x + myGridCellSideLength * 0.5f) / myGridCellSideLength));
-	int tileZ = static_cast<int>((ceil(aPosition.z - mySmallestNodePosition.z + myGridCellSideLength * 0.5f) / myGridCellSideLength));
+	int tileX = static_cast<int>((ceil(aPosition.x - mySmallestMapPosition.x + myGridCellSideLength * 0.5f) / myGridCellSideLength));
+	int tileZ = static_cast<int>((ceil(aPosition.z - mySmallestMapPosition.z + myGridCellSideLength * 0.5f) / myGridCellSideLength));
 	int tileIndex = tileX + (tileZ * myAmountOfColumns);
 
 	if (tileIndex < 0 || tileIndex > static_cast<int>(myGrid.size()) - 1)
@@ -775,10 +901,11 @@ Tga::Vector3f Forge::AIDirector::GetXZPositionFromIndex(const int aIndex) const
 	const int column = (aIndex % myAmountOfColumns);
 
 
-	float const X = mySmallestNodePosition.x + (myGridCellSideLength * static_cast<float>(column));
-	float const Z = mySmallestNodePosition.z + (myGridCellSideLength * static_cast<float>(row));
+	float const X = mySmallestMapPosition.x + (myGridCellSideLength * static_cast<float>(column));
+	float const Z = mySmallestMapPosition.z + (myGridCellSideLength * static_cast<float>(row));
 
-	return { X, 0.f, Z };
+
+	return { X, myAverageMapHeight, Z };
 }
 
 std::vector<int> Forge::AIDirector::GetClosestNeighborCells(const int aCellIndex) const
@@ -890,20 +1017,41 @@ void Forge::AIDirector::OnEvent(const GameEvent& e)
 	auto stressUpdate = [this]()
 		{
 			myData.playerStress = std::clamp(myData.playerStress, 0.f, 1.f);
-			myData.stressTimer = DirectorData::STRESS_DURATION_RESET;
+			myData.stressTimer = DirectorStaticData::STRESS_DURATION_RESET;
 		};
 
 	switch (e.message)
 	{
+	case GameEvent::Message::DecompressAction:
+	{
+		myCommands.emplace_back(std::make_shared<DecompressCommand>(this));
+		break;
+	}
+	case GameEvent::Message::RecommenceAction:
+	{
+		for (std::shared_ptr<DirectorCommand> const& command : myCommands)
+		{
+			if (DecompressCommand* decompress = dynamic_cast<DecompressCommand*>(command.get()))
+			{
+				decompress->SetIsDone(true);
+			}
+		}
+		break;
+	}
 	case GameEvent::Message::EnemyKilled:
 	{
-		const auto enemy = e.GetValue<Object*>();
-		const float distanceSqr = (enemy->GetTransform().GetPosition() - myData.player->GetTransform().GetPosition()).LengthSqr();
-		if (distanceSqr < DirectorData::KILL_RANGE_SQR)
+		const float distanceSqr = e.GetValue<float>();
+		if (distanceSqr < DirectorStaticData::KILL_RANGE_SQR)
 		{
-			myData.playerStress += DirectorData::ENEMY_KILLED_STRESS_VALUE;
+			myData.playerStress += DirectorStaticData::ENEMY_KILLED_STRESS_VALUE;
 			stressUpdate();
+
+			if (distanceSqr < DirectorStaticData::SPLATTER_RANGE_SQR)
+			{
+				Locator::GetRenderer()->ResetSplatter();
+			}
 		}
+
 		break;
 	}
 	case GameEvent::Message::DespawnEnemy:
@@ -916,13 +1064,13 @@ void Forge::AIDirector::OnEvent(const GameEvent& e)
 	}
 	case GameEvent::Message::PlayerHitByCommon:
 	{
-		myData.playerStress += DirectorData::TAKING_DAMAGE_STRESS_VALUE;
+		myData.playerStress += myData.takingDamageStressValue;
 		stressUpdate();
 		break;
 	}
 	case GameEvent::Message::PlayerHitBySpecial:
 	{
-		myData.playerStress = DirectorData::ATTACKED_BY_SPECIAL_STRESS_VALUE;
+		myData.playerStress = DirectorStaticData::ATTACKED_BY_SPECIAL_STRESS_VALUE;
 		stressUpdate();
 		break;
 	}
@@ -937,7 +1085,12 @@ void Forge::AIDirector::OnEvent(const GameEvent& e)
 
 		for (auto enemy : myEnemies)
 		{
-			if (!enemy->CheckIfActive())
+			CommonController* controller = enemy->GetComponent<CommonController>();
+			if (!controller)
+			{
+				continue;
+			}
+			if (!enemy->CheckIfActive() || controller->GetCurrentStateId() == CommonState::Death)
 			{
 				continue;
 			}
@@ -960,7 +1113,6 @@ void Forge::AIDirector::OnEvent(const GameEvent& e)
 	}
 	case GameEvent::Message::BombExplode:
 	{
-		// std::cout << "Bomb exploded\n";
 		const auto [explosionPos, radius] = e.GetValue<std::pair<Tga::Vector3f, float>>();
 
 		for (auto enemy : myEnemies)
@@ -970,11 +1122,17 @@ void Forge::AIDirector::OnEvent(const GameEvent& e)
 				continue;
 			}
 			CommonController* controller = enemy->GetComponent<CommonController>();
+			if (!controller)
+			{
+				continue;
+			}
 			const CommonState currentState = controller->GetCurrentStateId();
-
 			if (((explosionPos - enemy->GetTransform().GetPosition()).LengthSqr() < (radius * radius)))
 			{
-				controller->QueueNextState(CommonState::Death);
+				if (currentState != CommonState::Death)
+				{
+					controller->QueueNextState(CommonState::Death);
+				}
 			}
 			else if (currentState == CommonState::PipeBomb)
 			{
@@ -983,26 +1141,50 @@ void Forge::AIDirector::OnEvent(const GameEvent& e)
 		}
 		break;
 	}
+	case GameEvent::Message::PlayerSingleShot:
+	{
+		const float hearingDistanceSqr = myCommonZombieData.hearDistance * myCommonZombieData.hearDistance;
+		const Tga::Vector3f& playerPos = myData.player->GetTransform().GetPosition();
+		constexpr int MAX_ALERTED = 3;
+		int alerted = 0;
+
+		for (auto enemy : myEnemies)
+		{
+			if (!enemy->CheckIfActive())
+			{
+				continue;
+			}
+			CommonController* const controller = enemy->GetComponent<CommonController>();
+			const CommonState currentState = controller->GetCurrentStateId();
+			if (currentState != CommonState::Idle && currentState != CommonState::Wander)
+			{
+				continue;
+			}
+			const Tga::Vector3f& position = enemy->GetTransform().GetPosition();
+			if (!CheckIfXZPlanePosInFrustum(myPlayerFrustum, position))
+			{
+				continue;
+			}
+			const float distanceToPlayerSqr = (playerPos - position).LengthSqr();
+			if (distanceToPlayerSqr < hearingDistanceSqr)
+			{
+
+				controller->QueueNextState(CommonState::Pathfind);
+				PathfindState* const pathfind = controller->AccessState<PathfindState>(CommonState::Pathfind);
+				pathfind->SetPath(myNavmesh->PathfindFunneled(position, playerPos));
+				++alerted;
+				if (alerted == MAX_ALERTED)
+				{
+					break;
+				}
+
+			}
+		}
+		break;
+	}
 	case GameEvent::Message::DirectorStopUpdate:
 	{
 		myInitialized = false;
-		break;
-	}
-	case GameEvent::Message::DecompressAction:
-	{
-		myCommands.emplace_back(std::make_shared<DecompressCommand>());
-		break;
-	}
-	case GameEvent::Message::RecommenceAction:
-	{
-		for (std::shared_ptr<DirectorCommand> const& command : myCommands)
-		{
-			DecompressCommand* decompress = dynamic_cast<DecompressCommand*> (command.get());
-			if (decompress)
-			{
-				decompress->SetIsDone(true);
-			}
-		}
 		break;
 	}
 	default:
@@ -1015,6 +1197,37 @@ void Forge::AIDirector::OnEvent(const GameEvent& e)
 void Forge::AIDirector::ProvideCrescendoPoint(int id, Tga::Vector3f& aPos)
 {
 	myCrescendoPoints.emplace_back(id, aPos);
+}
+
+void Forge::AIDirector::ProvideDecompressZone(Object* aZone)
+{
+	ColliderComponent* collider = aZone->GetComponent<ColliderComponent>();
+	float radius = 0.f;
+	const Tga::Vector3f pos = aZone->GetTransform().GetPosition();
+
+	if (collider)
+	{
+		const ColliderType type = collider->GetMyType();
+
+		switch (type)
+		{
+		case ColliderType::Sphere:
+		{
+			radius = collider->GetMyShape<Sphere>()->radius;
+			break;
+		}
+		case ColliderType::AABB:
+		{
+			const Tga::Vector3f extents = collider->GetMyShape<AABB >()->dimensions;
+
+			radius = std::max(std::max(extents.x, extents.y), extents.z);
+			break;
+		}
+		}
+	}
+
+	myDecompressZones.emplace_back(radius, pos);
+
 }
 
 void Forge::AIDirector::SpawnMob(Tga::Vector3f& aFrom, Tga::Vector3f& aTo, int amount)
@@ -1075,10 +1288,11 @@ void Forge::AIDirector::Clear()
 		enemy = nullptr;
 	}
 	myCrescendoPoints.clear();
+	myDecompressZones.clear();
 	myThreatZones.clear();
-
-	myData.mobTimer = DirectorData::MOB_TIMER_MAX_RESET;
-	myData.stressTimer = DirectorData::STRESS_DURATION_RESET;
+	myData.playerLeftSpawn = false;
+	myData.hordeTimer = myData.hordeMaxInterval;
+	myData.stressTimer = DirectorStaticData::STRESS_DURATION_RESET;
 	myData.playerStress = 0.f;
 	myInitialized = false;
 
@@ -1088,77 +1302,60 @@ void Forge::AIDirector::Clear()
 
 bool Forge::AIDirector::CreateGridAndMapWorld()
 {
-
-	RandomNumberGenerator* randomNumberGenerator = Locator::GetRandomNumberGenerator();
-	// myCellCenters.clear();
 	myGrid.clear();
+	auto& navMeshNodes = myNavmesh->GetNodes();
 
-	Tga::Vector3f smallestXYZ{ 0.f, 0.f, 0.f };
-	Tga::Vector3f largestXYZ{ 0.f, 0.f, 0.f };
+	if (navMeshNodes.empty()) { return false; }
 
-	auto& nodes = Locator::GetNavmesh()->GetNodes();
+	mySmallestMapPosition = {};
+	myLargestMapPosition = {};
 
-	for (auto& object : nodes)
+	for (auto& object : navMeshNodes)
 	{
-		Tga::Vector3f pos = object.myCenter;
-		smallestXYZ.x = std::min(pos.x, smallestXYZ.x);
-		smallestXYZ.z = std::min(pos.z, smallestXYZ.z);
-		largestXYZ.x = std::max(pos.x, largestXYZ.x);
-		largestXYZ.z = std::max(pos.z, largestXYZ.z);
+		const Tga::Vector3f pos = object.myCenter;
+
+		mySmallestMapPosition.x = std::min(pos.x, mySmallestMapPosition.x);
+		mySmallestMapPosition.y = std::min(pos.y, mySmallestMapPosition.y);
+		mySmallestMapPosition.z = std::min(pos.z, mySmallestMapPosition.z);
+
+		myLargestMapPosition.x = std::max(pos.x, myLargestMapPosition.x);
+		myLargestMapPosition.y = std::max(pos.y, myLargestMapPosition.y);
+		myLargestMapPosition.z = std::max(pos.z, myLargestMapPosition.z);
 	}
+
+	myAverageMapHeight = (mySmallestMapPosition.y + myLargestMapPosition.y) * 0.5f;
 
 	Tga::Vector3f playerPos = myData.player->GetTransform().GetPosition();
 	Tga::Vector3f endPos = myLevelEnd->GetTransform().GetPosition();
 
-	Tga::Vector3f middleGround = (playerPos + endPos) / 2.f;
-	middleGround.y += 500.f;
-	float gridXDimension = abs(smallestXYZ.x - largestXYZ.x);
-	float gridZDimension = abs(smallestXYZ.z - largestXYZ.z);
-
-	myLineExtreme = std::max(gridXDimension, gridZDimension);
-	myNumLines = 3 + (uint16_t)(myLineExtreme / myGridCellSideLength);
+	const float gridXDimension = abs(mySmallestMapPosition.x - myLargestMapPosition.x);
+	const float gridZDimension = abs(mySmallestMapPosition.z - myLargestMapPosition.z);
+	constexpr float safeMargin = 1.05f;
+	myTotalGridSideLength = std::max(gridXDimension, gridZDimension) * safeMargin;
+	constexpr uint16_t margin = 3;
+	myNumLines = margin + static_cast<uint16_t>(myTotalGridSideLength / myGridCellSideLength);
 
 	myAmountOfColumns = static_cast<int>(myNumLines);
 	myAmountOfRows = static_cast<int>(myNumLines);
 	myNumberOfCells = myAmountOfColumns * myAmountOfRows;
-	// myCellCenters.resize(myNumberOfCells);
 	myGrid.resize(myNumberOfCells);
 
-	mySmallestNodePosition = { smallestXYZ.x - myGridCellHalfLength, 0, smallestXYZ.z - myGridCellHalfLength };
-	myLargestPosition = { largestXYZ.x - myGridCellHalfLength, 0, largestXYZ.z - myGridCellHalfLength };
-
-	for (unsigned int row = 0; row < static_cast<unsigned int>(myAmountOfRows); ++row)
+	for (int row = 0; row < myAmountOfRows; ++row)
 	{
-		row;
-		for (unsigned int column = 0; column < static_cast<unsigned int>(myAmountOfColumns); ++column)
+		for (int column = 0; column < myAmountOfColumns; ++column)
 		{
 			int const nodeIndex = (row * myAmountOfRows) + column;
-			/*float const X = mySmallestNodePosition.x + (myGridCellSideLength * static_cast<float>(column));
-			float const Z = mySmallestNodePosition.z + (myGridCellSideLength * static_cast<float>(row));*/
-
-			// myCellCenters[nodeIndex] = { X, middleGround.y, Z };
 			myGrid[nodeIndex].id = nodeIndex;
 		}
 	}
 
-	// std::cout << "grid center size " << myCellCenters.size() << std::endl;
-
-	if (!myNavmesh)
-	{
-		return false;
-	}
-	auto& navMeshNodes = myNavmesh->GetNodes();
-	if (navMeshNodes.empty())
-	{
-		return false;
-	}
 	for (auto& node : navMeshNodes)
 	{
 		const Tga::Vector3f& center = node.myCenter;
 		int index = GetCellIndexFromPosition(center);
 		myGrid[index].status = CellStatus::OtherPath;
 
-		for (auto neighbor : node.myConnections) // somehow check if connections are valid/ some might not be. 
+		for (auto neighbor : node.myConnections)
 		{
 			if (neighbor != -1)
 			{
@@ -1178,83 +1375,105 @@ bool Forge::AIDirector::CreateGridAndMapWorld()
 		}
 	}
 
+	RandomNumberGenerator* randomGenerator = Locator::GetRandomNumberGenerator();
+
 	for (auto& cell : myGrid)
 	{
 		if (cell.status == CellStatus::OtherPath)
 		{
-			cell.zCount = static_cast<int8_t>(randomNumberGenerator->GenerateRandomInt(NULL_CHANCE_SPAWN, OTHER_PATH_MAX_SPAWN));
+			cell.zCount = static_cast<int8_t>(randomGenerator->GenerateRandomInt(NULL_CHANCE_SPAWN, OTHER_PATH_MAX_SPAWN));
 		}
 	}
 
 	myRoughPath = myNavmesh->AStarPathfind(myData.player->GetTransform().GetPosition(), myLevelEnd->GetTransform().GetPosition());
 
-	if (myRoughPath.empty())
+	if (!myRoughPath.empty())
 	{
-		return false;
+
+		for (int main = 0; main < myRoughPath.size(); ++main)
+		{
+			const int index = GetCellIndexFromPosition(myRoughPath[main]);
+			myGrid[index].status = CellStatus::MainPath;
+
+			if (const int neighborIndex = main + 1; neighborIndex < myRoughPath.size())
+			{
+				Tga::Vector3f toNeighbor = (myRoughPath[neighborIndex] - myRoughPath[main]);
+				const int cellSteps = static_cast<int>(toNeighbor.Length() / myGridCellHalfLength);
+				toNeighbor.Normalize();
+				for (int step = 0; step < cellSteps; ++step)
+				{
+					const float floatStep = static_cast<float>(step);
+					const Tga::Vector3f betweenPos = myRoughPath[main] + toNeighbor * myGridCellSideLength * floatStep;
+					const int cell = GetCellIndexFromPosition(betweenPos);
+
+					myGrid[cell].status = CellStatus::MainPath;
+				}
+			}
+		}
+
+		for (auto& cell : myGrid)
+		{
+			if (cell.status == CellStatus::MainPath)
+			{
+				cell.zCount = static_cast<int8_t>(randomGenerator->GenerateRandomInt(0, MAIN_PATH_MAX_SPAWN));
+			}
+		}
+
+		const int triangleCount = static_cast<int>(myRoughPath.size() - 1);
+		constexpr int subdivisions = 16;
+		int spacing = triangleCount / subdivisions;
+		std::vector<int> multipliers;
+
+		//starting subdivision higher than one, as not to place threat zone directly att player spawn.
+		for (int subDiv = 4; subDiv < subdivisions + 1; subDiv += 2)
+		{
+			multipliers.emplace_back(subDiv);
+		}
+
+		std::ranges::shuffle(multipliers, Locator::GetRandomNumberGenerator()->myRandomState.GetMyRandomState());
+		std::vector<SpecialEnemy> specialEnemies;
+
+		for (int sE = 0; sE < static_cast<int>(SpecialEnemy::Count); ++sE)
+		{
+			specialEnemies.emplace_back(static_cast<SpecialEnemy>(sE));
+		}
+
+		std::ranges::shuffle(specialEnemies, Locator::GetRandomNumberGenerator()->myRandomState.GetMyRandomState());
+
+		for (int mult = 0; mult < THREAT_ZONE_AMOUNT; ++mult)
+		{
+			int threatZoneIndex = multipliers[mult] * spacing;
+			int gridIndex = GetCellIndexFromPosition(myRoughPath[threatZoneIndex]);
+			myGrid[gridIndex].status = CellStatus::ThreatZone;
+			myGrid[gridIndex].zCount = 0;
+
+			SpecialEnemy special = specialEnemies.back();
+			specialEnemies.pop_back();
+			myThreatZones.emplace_back(myRoughPath[threatZoneIndex], myGrid[gridIndex].id, special);
+		}
 	}
 
-	for (int main = 0; main < myRoughPath.size(); ++main)
+
+	for (auto& decompressZone : myDecompressZones)
 	{
-		const int index = GetCellIndexFromPosition(myRoughPath[main]);
-		myGrid[index].status = CellStatus::MainPath;
-
-		if (const int neighborIndex = main + 1; neighborIndex < myRoughPath.size())
+		const Tga::Vector3f gridPos = GetXZPositionFromIndex(GetCellIndexFromPosition(decompressZone.second));
+		const float squaredRadius = decompressZone.first * decompressZone.first;
+		for (auto& cell : myGrid)
 		{
-
-			Tga::Vector3f toNeighbor = (myRoughPath[neighborIndex] - myRoughPath[main]);
-			const int cellSteps = static_cast<int>(toNeighbor.Length() / myGridCellHalfLength);
-			toNeighbor.Normalize();
-			for (int step = 0; step < cellSteps; ++step)
+			if (cell.status != CellStatus::Invalid)
 			{
-				const float floatStep = static_cast<float>(step);
-				const Tga::Vector3f betweenPos = myRoughPath[main] + toNeighbor * myGridCellSideLength * floatStep;
-				const int cell = GetCellIndexFromPosition(betweenPos);
+				const float squaredDistance = (gridPos - GetXZPositionFromIndex(cell.id)).LengthSqr();
 
-				myGrid[cell].status = CellStatus::MainPath;
+				if (squaredDistance < squaredRadius)
+				{
+					cell.status = CellStatus::DecompressZone;
+				}
 			}
 		}
 	}
-	for (auto& cell : myGrid)
-	{
-		if (cell.status == CellStatus::MainPath)
-		{
-			cell.zCount = static_cast<int8_t>(randomNumberGenerator->GenerateRandomInt(0, MAIN_PATH_MAX_SPAWN));
-		}
-	}
-	const int triangleCount = static_cast<int>(myRoughPath.size() - 1);
-	constexpr int subdivisions = 16;
-	int spacing = triangleCount / subdivisions;
-	std::vector<int> multipliers;
-
-	//starting subdivision higher than zero or one, as not to place threat zone directly att player spawn.
-	for (int subDiv = 4; subDiv < subdivisions + 1; subDiv += 2)
-	{
-		multipliers.emplace_back(subDiv);
-	}
-
-	std::ranges::shuffle(multipliers, Locator::GetRandomNumberGenerator()->myRandomState.GetMyRandomState());
-	std::vector<SpecialEnemy> specialEnemies;
-
-	for (int sE = 0; sE < static_cast<int>(SpecialEnemy::Count); ++sE)
-	{
-		specialEnemies.emplace_back(static_cast<SpecialEnemy>(sE));
-	}
-	std::ranges::shuffle(specialEnemies, Locator::GetRandomNumberGenerator()->myRandomState.GetMyRandomState());
-
-	for (int mult = 0; mult < THREAT_ZONE_AMOUNT; ++mult)
-	{
-		int threatZoneIndex = multipliers[mult] * spacing;
-		int gridIndex = GetCellIndexFromPosition(myRoughPath[threatZoneIndex]);
-		myGrid[gridIndex].status = CellStatus::ThreatZone;
-		myGrid[gridIndex].zCount = 0;
-
-		SpecialEnemy special = specialEnemies.back();
-		specialEnemies.pop_back();
-		myThreatZones.emplace_back(myRoughPath[threatZoneIndex], myGrid[gridIndex].id, special);
-	}
 
 	myGrid[GetCellIndexFromPosition(myData.player->GetTransform().GetPosition())].status = CellStatus::PlayerSpawnZone;
-	std::cout << "AI_DIRECTOR was initialized successfully!\n";
+
 
 	return true;
 }
@@ -1269,66 +1488,45 @@ void Forge::AIDirector::CreateEnemies()
 	const std::string femaleZombie = "FemaleZombie_";
 	Tga::StringId objectDefinitionName;
 
-	while (zombieIndex < ENEMY_MAX_TOTAL_AMOUNT)
+	while (zombieIndex < ENEMY_MAX_TOTAL_AMOUNT / 2)
 	{
 		for (unsigned int i = 0; i < (ENEMY_MAX_SPAWN / 4); ++i)
 		{
 			zombieName = maleZombie + std::to_string(i + 1);
 			objectDefinitionName = Tga::StringRegistry::RegisterOrGetString(zombieName);
 			Object* newMale = InstantiateEnemy(objectDefinitionName, ObjectType::CommonZombie);
+
 			if (newMale != nullptr)
 			{
 				myEnemies[zombieIndex] = newMale;
-
 				DespawnEnemy(newMale);
 				++zombieIndex;
 			}
+		}
+	}
+
+	myHasCommonAnimationPlayers = false;
+
+	while (zombieIndex < ENEMY_MAX_TOTAL_AMOUNT)
+	{
+		for (unsigned int i = 0; i < (ENEMY_MAX_SPAWN / 4); ++i)
+		{
 			zombieName = femaleZombie + std::to_string(i + 1);
 			objectDefinitionName = Tga::StringRegistry::RegisterOrGetString(zombieName);
 			Object* newFemale = InstantiateEnemy(objectDefinitionName, ObjectType::CommonZombie);
+
 			if (newFemale != nullptr)
 			{
 				myEnemies[zombieIndex] = newFemale;
-
 				DespawnEnemy(newFemale);
 				++zombieIndex;
 			}
 		}
 	}
 
-	/*myHasCommonAnimationPlayers = false;
-	while (zombieIndex < ENEMY_MAX_TOTAL_AMOUNT)
-	{
-		for (unsigned int i = 0; i < (ENEMY_MAX_SPAWN / 4); ++i)
-		{
-			/*zombieName = maleZombie + std::to_string(i + 1);
-			Tga::StringId objectDefinitionName = Tga::StringRegistry::RegisterOrGetString(zombieName);
-			Object* newMale = InstantiateEnemy(objectDefinitionName, ObjectType::CommonZombie);
-			if (newMale != nullptr)
-			{
-				myEnemies[zombieIndex] = newMale;
-
-				DespawnEnemy(newMale);
-				++zombieIndex;
-			}#1#
-			zombieName = femaleZombie + std::to_string(i + 1);
-			objectDefinitionName = Tga::StringRegistry::RegisterOrGetString(zombieName);
-			Object* newFemale = InstantiateEnemy(objectDefinitionName, ObjectType::CommonZombie);
-			if (newFemale != nullptr)
-			{
-				myEnemies[zombieIndex] = newFemale;
-
-				DespawnEnemy(newFemale);
-				++zombieIndex;
-			}
-		}
-	}*/
-
-
+	myHasCommonAnimationPlayers = false;
 	std::ranges::shuffle(myEnemies, Locator::GetRandomNumberGenerator()->myRandomState.GetMyRandomState());
 
-	/*myHasCommonAnimationPlayers = false;
-	myHasCommonAnimationsStrings = false;*/
 }
 
 void Forge::AIDirector::PopulateWorld()
@@ -1341,34 +1539,16 @@ void Forge::AIDirector::PopulateWorld()
 	// Populate world
 	int zombieIndex = 0;
 
-	/*
-	 * Object* enemy = nullptr;
-	 *for (auto& threatZone : myThreatZones) // in alfa state common zombies get to populate the threat zones.
-	{
-		for (int e = 0; e < 5; e++)
-		{
-			enemy = myEnemies[zombieIndex];
-			if (enemy != nullptr && !enemy->CheckIfActive())
-			{
-				Tga::Vector3f zone = threatZone.spawnPoint;
-				zone += Tga::Vector3f{ static_cast<float>(rand() % 20) * static_cast<float>(e) , 0.f, static_cast<float>(rand() % 20) * static_cast<float>(e) };
-				SpawnEnemy(enemy, zone);
-			}
-			zombieIndex++;
-		}
-	}*/
+	// create safe starting area for player. 
 	const Tga::Vector3f playPos = myData.player->GetTransform().GetPosition();
 	int playerCell = GetCellIndexFromPosition(playPos);
 	myActiveArea = CalculateActiveAreaCells(playerCell);
 
 	const float savedActiveAreaRadius = myActiveAreaRadius;
 	constexpr float safetyScalar = 1.5f;
-	// myActiveAreaRadius *= safetyScalar; // in the beginning we don't want enemies to immediately  spawn close to and attack the player
 	myActiveAreaRadius = myCommonZombieData.lostViewDistance * safetyScalar; // in the beginning we don't want enemies to immediately  spawn close to and attack the player
 	const AreaSet safeArea = CalculateActiveAreaCells(playerCell);
 	myActiveAreaRadius = savedActiveAreaRadius;
-
-
 
 	for (const int cell : safeArea.GetCells())
 	{
@@ -1389,7 +1569,7 @@ void Forge::AIDirector::PopulateWorld()
 	for (const int cellId : myActiveArea.GetCells())
 	{
 		const CellStatus status = myGrid[cellId].status;
-		if (status == CellStatus::ThreatZone || status == CellStatus::PlayerSpawnZone || status == CellStatus::Invalid)
+		if (status == CellStatus::ThreatZone || status == CellStatus::PlayerSpawnZone || status == CellStatus::Invalid || status == CellStatus::DecompressZone)
 		{
 			continue;
 		}
@@ -1412,6 +1592,13 @@ void Forge::AIDirector::PopulateWorld()
 			break;
 		}
 	}
+
+#ifndef _RETAIL
+	for (auto& threatZone : myThreatZones) // in alfa state common zombies get to populate the threat zones.
+	{
+		std::cout << "A Boss by the name of " << magic_enum::enum_name(threatZone.special) << ", was spawned in area " << threatZone.cellId << ":: [x, y, z] " << threatZone.spawnPoint << "\n";
+	}
+#endif
 }
 
 Object* Forge::AIDirector::InstantiateEnemy(Tga::StringId anObjectDefinitionName, ObjectType anObjectType)
@@ -1427,7 +1614,7 @@ Object* Forge::AIDirector::InstantiateEnemy(Tga::StringId anObjectDefinitionName
 	}
 
 	Object* newObject = *objectManager->AccessObjects().emplace(new Object(anObjectType));
-	newObject->GetTransform().SetPosition(ourAIBlackboard.GetValue<Tga::Vector3f>("PlayerPos"_tgaid));
+	newObject->GetTransform().SetPosition({HIDDEN, HIDDEN, HIDDEN }/*ourAIBlackboard.GetValue<Tga::Vector3f>("PlayerPos"_tgaid)*/);
 	SceneLoading::ScenePropertyExtractor props(definition->EditProperties());
 
 	const std::vector<const Tga::SceneModel*> sceneModels = props.GetAllCopyOnWriteWrapperByType<Tga::SceneModel>();
@@ -1451,15 +1638,14 @@ Object* Forge::AIDirector::InstantiateEnemy(Tga::StringId anObjectDefinitionName
 
 		if (sceneModel->isAnimated)
 		{
-
 			auto& model = renderer->AddAnimatedModel(std::move(objectManager->CreateAnimatedModelInstance(*sceneModel)), modelRenderMode, modelBlendMode, shader);
-			model.id = newObject->GetObjectID();
+			model.isDynamic = true;
+
 			AnimatedModelComponent* animatedModelComponent = newObject->CreateComponent<AnimatedModelComponent>(model, newObject);
 
 			animatedModelComponent->SetLocalTransform(sceneModel->GetTransform());
 
-			CreateModelAnimations(*sceneModels[0], *animatedModelComponent);
-
+			CreateModelAnimations(*sceneModels[index], *animatedModelComponent);
 		}
 		else
 		{
@@ -1467,7 +1653,6 @@ Object* Forge::AIDirector::InstantiateEnemy(Tga::StringId anObjectDefinitionName
 		}
 
 	}
-
 
 	if (!myHasCommonData)
 	{
@@ -1483,6 +1668,8 @@ Object* Forge::AIDirector::InstantiateEnemy(Tga::StringId anObjectDefinitionName
 		myCommonZombieData.physData.physMat = Tga::PhysicsData::PhysicsMaterialType::Flesh;
 
 		myHasCommonData = true;
+
+
 	}
 
 	newObject->CreateComponent<CommonController>(newObject, myCommonZombieData);
@@ -1493,93 +1680,18 @@ Object* Forge::AIDirector::InstantiateEnemy(Tga::StringId anObjectDefinitionName
 void Forge::AIDirector::CreateModelAnimations(const Tga::SceneModel& aSceneModel, AnimatedModelComponent& aModelComponent)
 {
 	// Load animations
-	const auto& instance = aModelComponent.GetAnimatedModelInstance();
 	AnimatedModel& animatedModel = aModelComponent.GetAnimatedModel();
 	animatedModel;
-
-	if (!myHasCommonAnimationsStrings)
+	if (!myHasCommonAnimationPlayers/*&& !aSceneModel.animations.empty()*/)
 	{
-		myCommonAnimations = aSceneModel.animations;
-		myHasCommonAnimationsStrings = true;
-	}
-
-
-	if (instance.IsValid() && !myHasCommonAnimationPlayers/*&& !aSceneModel.animations.empty()*/)
-	{
-		for (const auto& [tag, path] : myCommonAnimations)
-		{
-			if (tag == "idleA"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("idleA"_tgaid, path.GetString(), true, true);
-			}
-			else if (tag == "idleB"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("idleB"_tgaid, path.GetString(), true, false);
-			}
-			else if (tag == "idleC"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("idleC"_tgaid, path.GetString(), true, false);
-			}
-			else if (tag == "sprintA"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("sprintA"_tgaid, path.GetString(), true, false);
-			}
-			else if (tag == "sprintB"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("sprintB"_tgaid, path.GetString(), true, false);
-			}
-			else if (tag == "sprintC"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("sprintC"_tgaid, path.GetString(), true, false);
-			}
-			else if (tag == "attackA"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("attackA"_tgaid, path.GetString(), true, false);
-			}
-			else if (tag == "attackB"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("attackB"_tgaid, path.GetString(), true, false);
-			}
-			else if (tag == "attackC"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("attackC"_tgaid, path.GetString(), true, false);
-			}
-			else if (tag == "deathA"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("deathA"_tgaid, path.GetString(), false, false);
-			}
-			else if (tag == "deathB"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("deathB"_tgaid, path.GetString(), false, false);
-			}
-			else if (tag == "deathC"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("deathC"_tgaid, path.GetString(), false, false);
-			}
-			else if (tag == "wanderA"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("wanderA"_tgaid, path.GetString(), true, false);
-			}
-			else if (tag == "wanderB"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("wanderB"_tgaid, path.GetString(), true, false);
-			}
-			else if (tag == "wanderC"_tgaid)
-			{
-				aModelComponent.GetAnimatedModel().AddNewAnimation("wanderC"_tgaid, path.GetString(), true, false);
-			}
-		}
+		ObjectManager::CreateModelAnimations(aSceneModel, aModelComponent);
 		myAnimationStates = animatedModel.GetAnimationStates();
 		myHasCommonAnimationPlayers = true;
-
 	}
 	else
 	{
-		std::cout << "copied animations\n";
 		animatedModel.SetAnimationStates(myAnimationStates);
-		animatedModel.SetCurrentState("idleA"_tgaid);
-	}
-
+	}		
 }
 
 
@@ -1593,10 +1705,9 @@ void Forge::AIDirector::MakeEnemyPathFind(Object* aEnemy, const std::vector<Tga:
 	controller->QueueNextState(CommonState::Pathfind);
 }
 
-void Forge::AIDirector::UpdateActiveAreaAndSpawnZones()
+void Forge::AIDirector::UpdateActiveArea(float)
 {
 	// calculate entered and exited area sets
-
 	const Tga::Vector3f playerPos = myData.player->GetTransform().GetPosition();
 
 	const int playerCell = GetCellIndexFromPosition(playerPos);
@@ -1617,12 +1728,14 @@ void Forge::AIDirector::UpdateActiveAreaAndSpawnZones()
 			const int zombieCell = GetCellIndexFromPosition(zombie->GetTransform().GetPosition());
 			auto controller = zombie->GetComponent<CommonController>();
 			const CommonState state = controller->GetCurrentStateId();
-			if (myExitedArea.Contains(zombieCell) && (state == CommonState::Idle || state == CommonState::Wander)) // might want to check for state so that path finding zombie are not despawned...
+
+			// only despawn if not path finding to player...
+			if (myExitedArea.Contains(zombieCell) && (state == CommonState::Idle || state == CommonState::Wander))
 			{
 				toDespawn.push_back(zombie);
 			}
 		}
-
+		// despawn zombies in exited area
 		for (auto despawn : toDespawn)
 		{
 			DespawnEnemy(despawn);
@@ -1632,12 +1745,11 @@ void Forge::AIDirector::UpdateActiveAreaAndSpawnZones()
 	if (tempEntered.Size() > 0)
 	{
 		myEnteredArea = tempEntered;
-		// std::cout << "entered area size : " << myEnteredArea.Size() << std::endl;
 		std::vector<Object*> toSpawn;
 		toSpawn.reserve(ENEMY_MAX_TOTAL_AMOUNT);
 
-
-		if (myData.currentPhase != Phases::Relax)
+		// spawn new enemies in recently entered area, granted player stress level is not to high.
+		if (myData.currentPhase != Phases::Relax && myData.currentPhase != Phases::PeakFade)
 		{
 			for (auto zombie : myEnemies)
 			{
@@ -1652,7 +1764,7 @@ void Forge::AIDirector::UpdateActiveAreaAndSpawnZones()
 				for (const int cellID : myEnteredArea.GetCells())
 				{
 					const int8_t zCount = myGrid[cellID].zCount;
-					if (zCount < 1 || myGrid[cellID].status == CellStatus::PlayerSpawnZone)
+					if (zCount < 1 || myGrid[cellID].status == CellStatus::PlayerSpawnZone || myGrid[cellID].status == CellStatus::DecompressZone)
 					{
 						continue;
 					}
@@ -1676,125 +1788,185 @@ void Forge::AIDirector::UpdateActiveAreaAndSpawnZones()
 			}
 		}
 	}
-
-
-	// Discern possible horde spawn zone
-	myPossibleHordeSpawnZones.Clear();
-	myPossibleHordeSpawnZones = myActiveArea;
-	myPossibleHordeSpawnZones += myExitedArea;
-
-	AreaSet impossibleZones;
-	impossibleZones.Insert(playerCell);
-
-	const Tga::Vector3f playerCellPosition = GetXZPositionFromIndex(playerCell);
-	for (const int cell : myPossibleHordeSpawnZones.GetCells())
-	{
-		// minimum distance check
-		const Tga::Vector3f otherCellPosition = GetXZPositionFromIndex(cell);
-		const Tga::Vector3f cellToPlayer = (playerCellPosition - otherCellPosition);
-		const float distance = cellToPlayer.Length();
-		constexpr float distanceFidelity = 0.75f; // lower number means more generous inclusion
-		if (distance < (myActiveAreaRadius * distanceFidelity))
-		{
-			impossibleZones.Insert(cell);
-			continue;
-		}
-		const Tga::Vector3f cellToPlayerNormalized = cellToPlayer.GetNormalized();
-		constexpr float traceFidelity = 0.25f; // lower number means higher fidelity;
-		const int steps = static_cast<int>(distance / (myGridCellHalfLength * traceFidelity));
-		const float increment = distance / static_cast<float>(steps);
-
-		bool isPossible = false;
-		for (int step = 0; step < steps; ++step)
-		{
-			const int cellToCheck = GetCellIndexFromPosition(otherCellPosition + (cellToPlayerNormalized * increment * static_cast<float>(step + 1)));
-			if (myGrid[cellToCheck].status == CellStatus::Invalid)
-			{
-				isPossible = true;
-				break;
-			}
-		}
-
-		if (!isPossible)
-		{
-			impossibleZones.Insert(cell);
-			continue;
-		}
-
-		/*if (myNavmesh->AStarPathfind(otherCellPosition ,playerPos).empty()) // could no path find from here to player, may this is to strict?
-		{
-			impossibleZones.Insert(cell);
-			// continue;
-		}*/
-
-	}
-	myPossibleHordeSpawnZones -= impossibleZones;
-
-	auto sortClosestToPlayer = [this, playerCellPosition](const int cellA, const int cellB)
-		{
-			const float lengthSqrToA = (playerCellPosition - GetXZPositionFromIndex(cellA)).LengthSqr();
-			const float lengthSqrToB = (playerCellPosition - GetXZPositionFromIndex(cellB)).LengthSqr();
-			return lengthSqrToA < lengthSqrToB;
-		};
-
-	std::ranges::sort(myPossibleHordeSpawnZones.AccessCells().begin(), myPossibleHordeSpawnZones.AccessCells().end(), sortClosestToPlayer);
-	// may sort again based of they are behind player or not...
-
-	//myExitedArea
-
-	/*auto sortBehindPlayer = [this, playerCellPosition](const int cellA, const int cellB)
-		{
-		 // if flow distance to level start for cell is less than the player flow distance to level start, then it is counted as behind.
-		// this can not be calculated to often... because expensive.
-		};*/
 }
 
-void Forge::AIDirector::UpdateMobSpawns(float aFixedTime)
+void Forge::AIDirector::UpdateSpawnZones(float fixedTime)
 {
-	myData.mobTimer -= (DirectorData::MOB_TIMER_TICK)*aFixedTime;
+	const Tga::Vector3f& playerPos = myData.player->GetTransform().GetPosition();
+	const int playerCell = GetCellIndexFromPosition(myData.player->GetTransform().GetPosition());
 
-	if (myData.mobTimer < 0.f && myData.currentPhase != Phases::Relax)
+	myData.spawnZoneTimer += fixedTime;
+	if (myData.spawnZoneTimer > DirectorStaticData::UPDATE_SPAWN_ZONE_TIME) // time sliced as not to do a lot of unnecessary pathfinding each frame.
 	{
+		myData.spawnZoneTimer = 0.f;
 
-		if (myData.currentPhase != Phases::Peak)
+		// Discern possible horde spawn zone before next wave
+		myPossibleHordeSpawnZones.Clear();
+		myPossibleHordeSpawnZones = myActiveArea;
+		myPossibleHordeSpawnZones += myExitedArea;
+
+		AreaSet impossibleZones;
+		impossibleZones.Insert(playerCell);
+
+		const Tga::Vector3f playerCellPosition = GetXZPositionFromIndex(playerCell);
+		for (const int cell : myPossibleHordeSpawnZones.GetCells())
 		{
-			// if player is stressed next horde will be smaller and vice versa	
-			myData.nextMobMax = static_cast<int>(FMath::Lerp(static_cast<float>(DirectorData::MOB_MAX_SIZE), static_cast<float>(DirectorData::MOB_MIN_SIZE), myData.playerStress));
-			// if player is stressed next horde will delay longer and vice versa
-			myData.mobTimer = FMath::Lerp(DirectorData::MOB_TIMER_MIN_RESET, DirectorData::MOB_TIMER_MAX_RESET, myData.playerStress);
+			// minimum distance check
+			const Tga::Vector3f otherCellPosition = GetXZPositionFromIndex(cell);
+			const Tga::Vector3f cellToPlayer = (playerCellPosition - otherCellPosition);
+			const float distance = cellToPlayer.Length();
+			// lower number means more generous inclusion
+			if (distance < (myActiveAreaRadius * HORDE_AREA_FIDELITY))
+			{
+				impossibleZones.Insert(cell);
+				continue;
+			}
+			const Tga::Vector3f cellToPlayerNormalized = cellToPlayer.GetNormalized();
+			constexpr float traceFidelity = 0.25f; // lower number means higher fidelity;
+			const int steps = static_cast<int>(distance / (myGridCellHalfLength * traceFidelity));
+			const float increment = distance / static_cast<float>(steps);
+
+
+			// check if player can see the spawn zone by quickly tracing a line from the zone to the player
+			bool isPossible = false;
+			for (int step = 0; step < steps; ++step)
+			{
+				const int cellToCheck = GetCellIndexFromPosition(otherCellPosition + (cellToPlayerNormalized * increment * static_cast<float>(step + 1)));
+				if (myGrid[cellToCheck].status == CellStatus::Invalid)
+				{
+					isPossible = true;
+					break;
+				}
+			}
+
+			if (!isPossible)
+			{
+				impossibleZones.Insert(cell);
+			}
+
+		}
+		myPossibleHordeSpawnZones -= impossibleZones;
+
+		auto sortClosestToPlayer = [this, playerCellPosition](const int cellA, const int cellB)
+			{
+				const float lengthSqrToA = (playerCellPosition - GetXZPositionFromIndex(cellA)).LengthSqr();
+				const float lengthSqrToB = (playerCellPosition - GetXZPositionFromIndex(cellB)).LengthSqr();
+				return lengthSqrToA < lengthSqrToB;
+			};
+
+		if (myPossibleHordeSpawnZones.GetCells().empty()) return;
+
+		std::ranges::sort(myPossibleHordeSpawnZones.AccessCells().begin(), myPossibleHordeSpawnZones.AccessCells().end(), sortClosestToPlayer);
+
+		// only keep the few closest ones
+		const int maxZones = std::clamp(static_cast<int>(myPossibleHordeSpawnZones.GetCells().size()), 0, SPAWN_ZONE_ROOF);
+
+		if (maxZones == 0) { return; }
+
+		myPossibleHordeSpawnZones.AccessCells() = std::vector(myPossibleHordeSpawnZones.GetCells().begin(), myPossibleHordeSpawnZones.GetCells().begin() + maxZones);
+
+		std::vector<std::pair<int, size_t>> cellWithFlowDistance;
+		cellWithFlowDistance.reserve(myPossibleHordeSpawnZones.Size());
+		impossibleZones.Clear();
+
+		const Tga::Vector3f levelEnd = myLevelEnd->GetTransform().GetPosition();
+
+		for (const int cell : myPossibleHordeSpawnZones.GetCells())
+		{
+			const size_t flowDistance = myNavmesh->AStarPathfind(GetXZPositionFromIndex(cell), levelEnd).size();
+
+			cellWithFlowDistance.emplace_back(cell, flowDistance);
+
 		}
 
+		myPossibleHordeSpawnZones -= impossibleZones;
+
+		const size_t playerFlowDistance = myNavmesh->AStarPathfind(playerPos, myLevelEnd->GetTransform().GetPosition()).size();
+
+		auto weightedSort = [this, playerFlowDistance, cellWithFlowDistance](const int cellA, const int cellB)
+			{
+
+				auto scoreCell = [this, playerFlowDistance, cellWithFlowDistance](const int aCell, int& aScore)
+					{
+
+						auto iterator = std::ranges::find_if(cellWithFlowDistance.begin(), cellWithFlowDistance.end(), [aCell](const std::pair<int, size_t>& pair) {return pair.first == aCell; });
+						// behind player relative to goal
+						if (iterator != cellWithFlowDistance.end() && iterator->second > playerFlowDistance)
+						{
+							++aScore;
+						}
+						// not in view frustum, i.e player is facing a way from spawn zone
+						if (!CheckIfXZPlanePosInFrustum(myPlayerFrustum, GetXZPositionFromIndex(aCell)))
+						{
+							++aScore;
+						}
+						// on main path
+						if (myGrid[aCell].status == CellStatus::MainPath)
+						{
+							++aScore;
+						}
+
+					};
+
+				int scoreA = 0;
+				int scoreB = 0;
+
+				scoreCell(cellA, scoreA);
+				scoreCell(cellB, scoreB);
+
+				return scoreA > scoreB;
+			};
+
+		std::ranges::sort(myPossibleHordeSpawnZones.AccessCells().begin(), myPossibleHordeSpawnZones.AccessCells().end(), weightedSort);
+	}
+}
+
+void Forge::AIDirector::UpdateHorde(float aFixedTime)
+{
+	if (myData.currentPhase != Phases::Peak)return;
+	myData.hordeTimer -= aFixedTime;
+	if (myPossibleHordeSpawnZones.GetCells().empty()) return;
+
+	if (myData.hordeTimer < 0.f && myData.currentPhase == Phases::Peak)
+	{
+		// if player is stressed next horde will be smaller and vice versa	
+		myData.nextHordeMax = static_cast<int>(FMath::Lerp(static_cast<float>(myData.hordeMaxSize), static_cast<float>(myData.hordeMinSize), myData.playerStress));
+
+		myData.hordeTimer = FMath::Lerp(myData.hordeMinInterval, myData.hordeMaxInterval, myData.playerStress);
 		const int spawnZone = myPossibleHordeSpawnZones.GetCells().front();
 		std::vector<Object*> toSpawn;
-		toSpawn.reserve(myData.nextMobMax);
+		toSpawn.reserve(myData.nextHordeMax);
 
 		for (Object* enemy : myEnemies)
 		{
 			if (enemy && !enemy->CheckIfActive())
 			{
 				toSpawn.emplace_back(enemy);
-				if (toSpawn.size() == myData.nextMobMax)
+				if (toSpawn.size() == myData.nextHordeMax)
 				{
 					break;
 				}
 			}
 		}
 
-		std::vector<Tga::Vector3f> path = myNavmesh->PathfindFunneled(GetXZPositionFromIndex(spawnZone), myData.player->GetTransform().GetPosition());
+		const Tga::Vector3f playerPos = myData.player->GetTransform().GetPosition();
+		const  Tga::Vector3f spawnPos = GetXZPositionFromIndex(spawnZone);
+		std::vector<Tga::Vector3f> path = myNavmesh->PathfindFunneled(spawnPos, playerPos);
 
 		if (!path.empty())
 		{
+			const Tga::Vector3f toSpawnDir = spawnPos - playerPos;
+			const float distance = std::clamp(toSpawnDir.Length(), 200.f, 1000.f);
+
+			Locator::GetAudioManager()->PlayEventSpatialized(FmodId::PushNotification_Multi, playerPos + toSpawnDir.GetNormalized() * distance);
+			Locator::GetAudioManager()->PlayEvent(FmodId::Detect_Stinger);
+
 			for (Object* enemy : toSpawn)
 			{
-				SpawnEnemy(enemy, GetXZPositionFromIndex(spawnZone));
+				SpawnEnemy(enemy, spawnPos);
 				MakeEnemyPathFind(enemy, path);
 			}
-
-
-
-
 		}
-
 	}
 }
 
@@ -1804,15 +1976,20 @@ void Forge::AIDirector::DespawnEnemy(Object* aEnemy)
 
 	CommonController* commonController = aEnemy->GetComponent<CommonController>();
 	if (!commonController) return;
-	aEnemy->GetTransform().SetPosition({ HIDDEN, HIDDEN, HIDDEN });
+	
 	auto& character = commonController->AccessCharacter();
 	auto bodyId = character->GetBodyID();
 	auto bodyInterface = Locator::GetPhysicsEngine()->GetBodyInterface();
 	character->SetPosition({ HIDDEN, HIDDEN, HIDDEN }, JPH::EActivation::DontActivate);
 	commonController->Update(1.f / 60.f);
+	aEnemy->GetTransform().SetPosition({ HIDDEN, HIDDEN, HIDDEN });
+	commonController->QueueNextState(CommonState::Idle);
 	AnimatedModelComponent* animatedModel = aEnemy->GetComponent<AnimatedModelComponent>();
 	animatedModel->Update(1.f / 60.f);
+	animatedModel->AccessRenderModelInstance()->shader = nullptr;
 	bodyInterface->RemoveBody(bodyId);
+
+	// aEnemy->Update(1.f / 60.f);
 	aEnemy->SetActive(false);
 }
 
@@ -1848,23 +2025,21 @@ void Forge::AIDirector::SpawnEnemy(Object* aEnemy, const Tga::Vector3f& zone)
 	character->SetLinearAndAngularVelocity(JPH::Vec3::sZero(), JPH::Vec3::sZero());
 	bodyInterface->ActivateBody(bodyId);
 
-	if (myData.currentPhase != Phases::Relax)
+	/*if (myData.currentPhase != Phases::Relax)
 	{
 		int  state = Locator::GetRandomNumberGenerator()->GenerateRandomInt(1, STATE_DICE);
 		if (state >= WANDER_CHANCE)
 		{
 			aEnemy->GetComponent<CommonController>()->QueueNextState(CommonState::Wander);
-			// std::cout << "spawned wanderer\n";
 		}
 		else
 		{
 			aEnemy->GetComponent<CommonController>()->QueueNextState(CommonState::Idle);
-			// std::cout << "spawned idle\n";
 		}
 	}
-	else
+	else*/
 	{
-		aEnemy->GetComponent<CommonController>()->QueueNextState(CommonState::Idle);
+		aEnemy->GetComponent<CommonController>()->QueueNextState(CommonState::Wander);
 	}
 }
 
@@ -1894,11 +2069,11 @@ bool Forge::AIDirector::CheckIfXZPlanePosInFrustum(const Frustum& aFrustum, cons
 	const Tga::Matrix4x4f playerPhysAxis = CalculatePlayerPhysMatrix();
 	const Tga::Vector2f center = { aCenter.x, aCenter.z };
 
-	const float frustumDistance = myData.playerCamera->GetSettings().farPlane - myData.playerCamera->GetSettings().nearPlane;
-	const float frustumScalar = myActiveAreaRadius / frustumDistance;
+	// const float frustumDistance = myData.playerCamera->GetSettings().farPlane - myData.playerCamera->GetSettings().nearPlane;
+	const float frustumScalar = myActiveAreaRadius / (SIGHT_DISTANCE_PLAYER_HALF);
 	const float rightDistance = (aFrustum.farrect.bl - aFrustum.farrect.br).Length() * frustumScalar;
 
-	const Tga::Vector3f aheadOfPlayer = playerPos + playerPhysAxis.GetForward() * myActiveAreaRadius /*frustumDistance * frustumScalar*/;
+	const Tga::Vector3f aheadOfPlayer = playerPos + playerPhysAxis.GetForward() * myActiveAreaRadius;
 	const Tga::Vector3f leftPoint = aheadOfPlayer + (playerPhysAxis.GetRight() * rightDistance * -0.5f);
 	const Tga::Vector3f rightPoint = aheadOfPlayer + (playerPhysAxis.GetRight() * rightDistance * 0.5f);
 
@@ -1971,26 +2146,17 @@ const Tga::Matrix4x4f Forge::AIDirector::CalculatePlayerPhysMatrix()
 
 void Forge::AIDirector::HandleCommands(float aFixedTime)
 {
-	std::vector<std::shared_ptr<DirectorCommand>> finishedCommands;
-	finishedCommands.reserve(myCommands.size());
-	for (std::shared_ptr<DirectorCommand> const& command : myCommands)
+	if (!myCommands.empty())
 	{
-		command->Update(aFixedTime, this);
-		if (command->CheckIsDone())
+		for (int i = static_cast<int>(myCommands.size() - 1); i >= 0; --i)
 		{
-			finishedCommands.emplace_back(command);
-		}
-	}
+			std::shared_ptr<DirectorCommand> command = myCommands[i];
 
-	for (auto& toDelete : finishedCommands)
-	{
-		for (int command = 0; command < myCommands.size(); ++command)
-		{
-			if (toDelete.get() == myCommands[command].get())
+			command->Update(aFixedTime, this);
+			if (command->CheckIsDone())
 			{
-				myCommands[command] = myCommands.back();
+				myCommands[i] = myCommands.back();
 				myCommands.pop_back();
-				--command;
 			}
 		}
 	}
@@ -2002,10 +2168,10 @@ void Forge::AIDirector::UpdateCurrentPhase(float aFixedTime)
 	{
 	case Phases::Relax:
 	{
-		myData.relaxTimer -= DirectorData::RELAX_TIMER_TICK * aFixedTime;
+		myData.relaxTimer -= aFixedTime;
 		if (myData.relaxTimer < 0.f && myData.playerLeftSpawn)
 		{
-			myData.relaxTimer = DirectorData::RELAX_TIMER_RESET;
+			myData.relaxTimer = DirectorStaticData::RELAX_TIMER_RESET;
 			myData.currentPhase = Phases::BuildUp;
 			Locator::GetAudioManager()->SetParameter(FmodId::MainMusic, static_cast<float>(myData.currentPhase));
 		}
@@ -2013,23 +2179,39 @@ void Forge::AIDirector::UpdateCurrentPhase(float aFixedTime)
 	}
 	case Phases::BuildUp:
 	{
-		if (myData.playerStress >= DirectorData::STRESS_PEAK_THRESHOLD)
+		myData.buildUpTimer -= aFixedTime;
+		if (myData.buildUpTimer < 0.f/*myData.playerStress >= DirectorData::STRESS_PEAK_THRESHOLD*/)
 		{
+			myData.buildUpTimer = DirectorStaticData::BUILD_UP_TIMER_RESET;
 			myData.currentPhase = Phases::Peak;
-			myData.nextMobMax = DirectorData::MOB_MIN_SIZE;
-			// if player is stressed next horde will delay longer and vice versa
-			myData.mobTimer = DirectorData::MOB_TIMER_MAX_RESET;
+			myData.hordeTimer = 0.f;
 			Locator::GetAudioManager()->SetParameter(FmodId::MainMusic, static_cast<float>(myData.currentPhase));
+
+
+			EventManager::Get()->Dispatch<GameEvent>(GameEvent::Message::ShowObjectiveText, std::make_any<HUD::ObjectiveData>(HUD::ObjectiveData{ .textToShow = "The algorithm is trying to cancel you."_tgaid, .timer = 3.f }));
 		}
 		break;
 	}
 	case Phases::Peak:
 	{
-		myData.peakTimer -= DirectorData::PEAK_TIMER_TICK * aFixedTime;
-		if (myData.peakTimer < 0.f && myData.stressTimer < FLT_EPSILON)
+		myData.peakTimer += aFixedTime;
+		if (myData.playerStress > DirectorStaticData::STRESS_PEAK_THRESHOLD || myData.peakTimer > DirectorStaticData::PEAK_MAX_TIME)
 		{
-			myData.peakTimer = DirectorData::PEAK_TIMER_RESET;
+			myData.peakTimer = DirectorStaticData::PEAK_TIMER_RESET;
+
+			myData.currentPhase = Phases::PeakFade;
+		}
+		break;
+	}
+	case Phases::PeakFade:
+	{
+		myData.peakFadeTimer -= aFixedTime;
+
+		if (myData.peakFadeTimer < 0.f && myData.playerStress < DirectorStaticData::STRESS_MIN_THRESHOLD)
+		{
+			myData.peakFadeTimer = DirectorStaticData::PEAK_FADE_TIMER_RESET;
 			myData.currentPhase = Phases::Relax;
+			myData.relaxTimer = DirectorStaticData::RELAX_TIMER_RESET;
 			Locator::GetAudioManager()->SetParameter(FmodId::MainMusic, static_cast<float>(myData.currentPhase));
 		}
 

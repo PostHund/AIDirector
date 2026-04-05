@@ -4,6 +4,12 @@
 #include "Objects/Object.h"
 #include "Utilities/Locator.h"
 
+Forge::AreaSet& Forge::AreaSet::operator=(const std::vector<int>& container)
+{
+	myCellIds = container;
+	return *this;
+}
+
 Forge::AreaSet& Forge::AreaSet::operator=(const AreaSet areaSet)
 {
 		myCellIds = areaSet.myCellIds;
@@ -139,6 +145,22 @@ void Forge::PlayerLeftSpawnCommand::Update(float, AIDirector* aAiDirector)
 	}
 }
 
+Forge::DirectorCommand::DirectorCommand()
+{
+}
+
+Forge::DecompressCommand::DecompressCommand()
+{
+}
+
+Forge::DecompressCommand::DecompressCommand(AIDirector* aAiDirector)
+{
+	auto& data = aAiDirector->myData;
+	data.relaxTimer = DirectorStaticData::RELAX_TIMER_RESET;
+	data.currentPhase = Phases::Relax;
+	Locator::GetAudioManager()->SetParameter(FmodId::MainMusic, static_cast<float>(data.currentPhase));
+}
+
 void Forge::DecompressCommand::Update(float, AIDirector* aAiDirector)
 {
 	if (aAiDirector)
@@ -146,19 +168,11 @@ void Forge::DecompressCommand::Update(float, AIDirector* aAiDirector)
 		auto& data = aAiDirector->myData;
 		if (!myIsDone)
 		{
-#ifndef _RETAIL
-			std::cout << "player is decompressing\n";
-#endif
-			data.relaxTimer   = DirectorData::RELAX_TIMER_RESET;
-			data.currentPhase = Phases::Relax;
-			Locator::GetAudioManager()->SetParameter(FmodId::MainMusic, static_cast<float>(data.currentPhase));
+			data.relaxTimer  = DirectorStaticData::RELAX_TIMER_RESET;
 		}
 		else
 		{
-#ifndef _RETAIL
-			std::cout << "player entered battle again\n";
-#endif
-			data.relaxTimer   = DirectorData::RELAX_TIMER_RESET;
+			data.relaxTimer   = DirectorStaticData::RELAX_TIMER_RESET;
 			data.currentPhase = Phases::BuildUp;
 			Locator::GetAudioManager()->SetParameter(FmodId::MainMusic, static_cast<float>(data.currentPhase));
 		}

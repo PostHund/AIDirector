@@ -30,7 +30,6 @@ namespace Forge
 
 	class AIDirector : public IEventListener<GameEvent>
 	{
-
 		friend class PlayerLeftSpawnCommand;
 		friend class DecompressCommand;
 
@@ -40,6 +39,10 @@ namespace Forge
 
 		void Init();
 #ifndef _RETAIL
+		void SetDirectorData();
+		void PlayerDebug(std::string& debugText);
+		void EnemyDebug(std::string& debugText);
+		void MiniMapDebug(std::string& debugText);
 		void AddDebugMenu();
 		void DebugDraw();
 		void DrawFrustum();
@@ -61,6 +64,7 @@ namespace Forge
 		const std::array<Object*, ENEMY_MAX_TOTAL_AMOUNT>& GetEnemies() const { return myEnemies; }
 
 		void ProvideCrescendoPoint(int id, Tga::Vector3f& aPos);
+		void ProvideDecompressZone(Object* aZone);
 		const CrescendoPoint* GetCrescendoPoint(int id) const;
 		Tga::Vector3f GetClosestSpawnPoint() const;
 		void Clear();
@@ -75,8 +79,9 @@ namespace Forge
 		void SpawnEnemy(Object* aEnemy, const Tga::Vector3f& zone);
 		void MakeEnemyPathFind(Object* aEnemy, const std::vector<Tga::Vector3f>& aPath);
 
-		void UpdateActiveAreaAndSpawnZones();
-		void UpdateMobSpawns(float aFixedTime);
+		void UpdateActiveArea(float fixedTime);
+		void UpdateSpawnZones(float fixedTime);
+		void UpdateHorde(float aFixedTime);
 		void HandleCommands(float aFixedTime);
 		void UpdateCurrentPhase(float aFixedTime);
 
@@ -85,10 +90,11 @@ namespace Forge
 		const Tga::Matrix4x4f CalculatePlayerPhysMatrix();
 
 	private:
-		std::vector<AidCell> myGrid;
+		std::vector<AIDCell> myGrid;
 		
 		// std::vector<Tga::Vector3f> myCellCenters;
 		std::vector<CrescendoPoint> myCrescendoPoints;
+		std::vector<std::pair<float, Tga::Vector3f>> myDecompressZones;
 		std::vector<ThreatZone> myThreatZones;
 
 		std::vector<Tga::Vector3f> myRoughPath;
@@ -105,25 +111,26 @@ namespace Forge
 		std::array<Object*, ENEMY_MAX_TOTAL_AMOUNT> myEnemies{ nullptr };
 		CommonData myCommonZombieData;
 		bool myHasCommonData       = false;
-		std::vector<std::pair<Tga::StringId, Tga::StringId>> myCommonAnimations;
+		std::vector<std::pair<Tga::StringId, Tga::StringId>> myCommonAnimationsStrings;
 		std::unordered_map<AnimationId, Tga::AnimationPlayer> myAnimationStates;
 		bool myHasCommonAnimationsStrings = false;
 		bool myHasCommonAnimationPlayers = false;
 
-		Tga::Vector3f mySmallestNodePosition;
-		Tga::Vector3f myLargestPosition;
+		Tga::Vector3f mySmallestMapPosition;
+		Tga::Vector3f myLargestMapPosition;
+		float myAverageMapHeight = 0.f;
 
 		Object* myLevelEnd;
-		DirectorData myData;
+		DirectorDynamicData myData;
 		Frustum myPlayerFrustum;
 
 		float myGridCellSideLength = 600.f; //1700.f
 		const float myGridCellHalfLength = myGridCellSideLength / 2.f;
-		float myLineExtreme = 1000.f;
+		float myTotalGridSideLength = 1000.f;
 
 		/*float myCommonZombieShoulderWith = 200.f;
 		float myCommonZombieMoveForce = 200.f;*/
-		float myActiveAreaRadius = 5000.f;
+		float myActiveAreaRadius = 6000.f;
 
 		int myAmountOfRows = 0;
 		int myAmountOfColumns = 0;

@@ -15,6 +15,8 @@ constexpr int THREAT_ZONE_AMOUNT = 3;
 constexpr int STATE_DICE = 6;
 constexpr int WANDER_CHANCE = 5;
 constexpr int NULL_CHANCE_SPAWN = -3;
+constexpr int SPAWN_ZONE_ROOF = 5;
+constexpr float HORDE_AREA_FIDELITY = 0.45f;
 
 
 constexpr float HIDDEN = -5000000.f;
@@ -28,7 +30,8 @@ namespace Forge
 	{
 		Relax,
 		BuildUp,
-		Peak
+		Peak,
+		PeakFade
 	};
 
 	enum class CellStatus : uint8_t
@@ -38,6 +41,7 @@ namespace Forge
 		OtherPath,
 		ThreatZone,
 		PlayerSpawnZone,
+		DecompressZone,
 		Count
 	};
 
@@ -50,7 +54,7 @@ namespace Forge
 		Count
 	};
 
-	struct AidCell
+	struct AIDCell
 	{
 		uint32_t id = INVALID_ID;
 		int8_t zCount = 0;
@@ -65,6 +69,7 @@ namespace Forge
 		AreaSet(const std::vector<int>& container) : myCellIds(container) {}
 		AreaSet(const AreaSet& aSet) = default;
 
+		AreaSet& operator=(const std::vector<int>& container);
 		AreaSet& operator=(const AreaSet areaSet);
 		AreaSet operator-(AreaSet& setB) const;
 		AreaSet operator-(const AreaSet& setB) const;
@@ -123,59 +128,95 @@ namespace Forge
 		size_t currentIndex = MAX_SIZE - 1;
 	};
 
-	struct DirectorData
+	namespace DirectorStaticData
+	{
+		//player stress
+		static constexpr float STRESS_MAX = 1.f;
+		static constexpr float STRESS_MODIFIER = 1.2f;
+		static constexpr float STRESS_PEAK_THRESHOLD = 0.99f;
+		static constexpr float STRESS_MIN_THRESHOLD = 0.05f;
+		static constexpr float STRESS_DURATION_RESET = 10.f; // how long the player stays stressed, before stress starting to tick down
+		static constexpr float STRESS_DOWN_TICK = 0.05f; // how much stress ticks down per second
+		static constexpr float KILL_RANGE_SQR = 500.f * 500.f;
+		static constexpr float SPLATTER_RANGE_SQR = 300.f * 300.f;
+		static constexpr float ENEMY_KILLED_STRESS_VALUE = 0.01f; // if enemy killed within 8 meters stress goes up
+		static constexpr float TAKING_DAMAGE_STRESS_VALUE = 0.05f; //  if player gets hit tress goes up
+		static constexpr float ATTACKED_BY_SPECIAL_STRESS_VALUE = STRESS_MAX;
+
+		// SpawnZones
+		static constexpr float UPDATE_SPAWN_ZONE_TIME = 0.75f;
+
+		// Phases
+		static constexpr float RELAX_TIMER_RESET = 15.f;
+		static constexpr float BUILD_UP_TIMER_RESET = 90.f;
+		static constexpr float PEAK_TIMER_RESET = 0.f;
+		static constexpr float PEAK_MAX_TIME = 60.f;
+		static constexpr float PEAK_FADE_TIMER_RESET = 15.f;
+
+		// Horde 
+		static constexpr float HORDE_TIMER_MIN_RESET = 10.f;
+		static constexpr float HORDE_TIMER_MAX_RESET = 20.f;
+		static constexpr int HORDE_MIN_SIZE = 2;
+		static constexpr int HORDE_MAX_SIZE = 9;
+	
+
+		// for statistics 
+		static constexpr float SNAP_SHOT_TIME = 0.016666f;
+	}
+	struct DirectorDynamicData
 	{
 		// for statistics 
 		CircularBuffer latestPlayerStress;
 		uint32_t totalActiveEnemies = 0;
 		float snapshotTimer = 0.f;
-		static constexpr float SNAP_SHOT_TIME = 0.016666f;
+		
 
 		//player stress
 		float playerStress = 0.f;
 		float stressTimer = 0.f; // tick down stress if player haven't been stressed for a while
-		static constexpr float STRESS_MAX = 1.f;
-		static constexpr float STRESS_PEAK_THRESHOLD = 0.9f;
-		static constexpr float STRESS_DURATION_RESET = 10.f; // how long the player stays stressed, before stress starting to tick down
-		static constexpr float STRESS_DOWN_TICK = 0.05f; // how much stress ticks down per second
-		static constexpr float KILL_RANGE_SQR = 800.f * 800.f;
-		static constexpr float ENEMY_KILLED_STRESS_VALUE = 0.01f; // if enemy killed within 8 meters stress goes up
-		static constexpr float TAKING_DAMAGE_STRESS_VALUE = 0.05f; //  if player gets hit tress goes up
-		static constexpr float ATTACKED_BY_SPECIAL_STRESS_VALUE = STRESS_MAX;
+		float takingDamageStressValue = 0.f;
+
+		// SpawnZones
+		float spawnZoneTimer = 0.f;
 
 		// Phases
 		Phases currentPhase = Phases::BuildUp;
 
-		// Mob (build up)
-		static constexpr float MOB_TIMER_MIN_RESET = 40.f;
-		static constexpr float MOB_TIMER_MAX_RESET = 80.f;
-		static constexpr float MOB_TIMER_TICK      = 1.f;
-		static constexpr int MOB_MIN_SIZE   = 2;
-		static constexpr int MOB_MAX_SIZE   = 7;
-		int nextMobMax = MOB_MAX_SIZE;
-		float mobTimer                             = MOB_TIMER_MAX_RESET;
-
 		// Relax
-		static constexpr float RELAX_TIMER_RESET = 30.f;
-		static constexpr float RELAX_TIMER_TICK = 1.f;
-		float relaxTimer = RELAX_TIMER_RESET;
+		float relaxTimer = DirectorStaticData::RELAX_TIMER_RESET;
+
+		// Build up
+		float buildUpPhaseLength = DirectorStaticData::BUILD_UP_TIMER_RESET;
+		float buildUpTimer       = DirectorStaticData::BUILD_UP_TIMER_RESET;
 
 		// peak
+		float peakTimer = DirectorStaticData::PEAK_TIMER_RESET;
 
-		static constexpr float PEAK_TIMER_RESET = 10.f;
-		static constexpr float PEAK_TIMER_TICK = 1.f;
-		float peakTimer = PEAK_TIMER_RESET;
+		// Horde 
+		int hordeMinSize = DirectorStaticData::HORDE_MIN_SIZE;
+		int hordeMaxSize = DirectorStaticData::HORDE_MAX_SIZE;
+
+		float hordeMinInterval = DirectorStaticData::HORDE_TIMER_MIN_RESET;
+		float hordeMaxInterval = DirectorStaticData::HORDE_TIMER_MAX_RESET;
+
+		int nextHordeMax = DirectorStaticData::HORDE_MAX_SIZE;
+		float hordeTimer = DirectorStaticData::HORDE_TIMER_MAX_RESET;
+
+		// peak fade
+		float peakFadeTimer = DirectorStaticData::PEAK_FADE_TIMER_RESET;
 
 		// player
 		Object* player = nullptr;
 		PlayerController* playerController = nullptr;
 		MainCamera* playerCamera = nullptr;
 		bool playerLeftSpawn = false;
+
 	};
 
 	class DirectorCommand
 	{
 	public:
+		DirectorCommand();
 		virtual ~DirectorCommand() = default;
 		virtual void Update(float, AIDirector*) {}
 		virtual bool CheckIsDone() const { return myIsDone; }
@@ -184,15 +225,20 @@ namespace Forge
 		bool myIsDone = false;
 	};
 
+	class DecompressCommand :public DirectorCommand
+	{
+	public:
+		DecompressCommand();
+		DecompressCommand(AIDirector* aAiDirector);
+		void Update(float fixedTime, AIDirector*) override;
+	};
+
 	class PlayerLeftSpawnCommand :public DirectorCommand
 	{
 		void Update(float fixedTime, AIDirector*) override;
 	};
 
-	class DecompressCommand :public DirectorCommand
-	{
-		void Update(float fixedTime, AIDirector*) override;
-	};
+	
 }
 
 static const Tga::Color GRID_COLORS[static_cast<int>(Forge::CellStatus::Count)]
