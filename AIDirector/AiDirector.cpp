@@ -1419,18 +1419,21 @@ bool Forge::AIDirector::CreateGridAndMapWorld()
 			}
 		}
 
+		// randomization of boss spawn zones
 		const int triangleCount = static_cast<int>(myRoughPath.size() - 1);
 		constexpr int subdivisions = 16;
 		int spacing = triangleCount / subdivisions;
 		std::vector<int> multipliers;
 
-		//starting subdivision higher than one, as not to place threat zone directly att player spawn.
+		// starting subdivision higher than one, as not to place threat zone directly att player spawn.
+		// each iteration is then incremented by two as to lower the risk of two bosses ending upp exactly next each other
 		for (int subDiv = 4; subDiv < subdivisions + 1; subDiv += 2)
 		{
 			multipliers.emplace_back(subDiv);
 		}
 
 		std::ranges::shuffle(multipliers, Locator::GetRandomNumberGenerator()->myRandomState.GetMyRandomState());
+
 		std::vector<SpecialEnemy> specialEnemies;
 
 		for (int sE = 0; sE < static_cast<int>(SpecialEnemy::Count); ++sE)
@@ -1438,6 +1441,7 @@ bool Forge::AIDirector::CreateGridAndMapWorld()
 			specialEnemies.emplace_back(static_cast<SpecialEnemy>(sE));
 		}
 
+		// the deck of bosses are shuffled, including a none-card as to make each boss encounter unpredictable
 		std::ranges::shuffle(specialEnemies, Locator::GetRandomNumberGenerator()->myRandomState.GetMyRandomState());
 
 		for (int mult = 0; mult < THREAT_ZONE_AMOUNT; ++mult)
