@@ -80,6 +80,7 @@ namespace Forge
 		void MakeEnemyPathFind(Object* aEnemy, const std::vector<Tga::Vector3f>& aPath);
 
 		void UpdateActiveArea(float fixedTime);
+		void UpdatePlayerRelatedData(float fixedTime);
 		void UpdateSpawnZones(float fixedTime);
 		void UpdateHorde(float aFixedTime);
 		void HandleCommands(float aFixedTime);

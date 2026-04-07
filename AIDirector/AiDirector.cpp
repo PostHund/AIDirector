@@ -828,52 +828,7 @@ void Forge::AIDirector::Update(const float aFixedTime)
 		return;
 	}
 
-	const Tga::Vector3f playerPos = myData.player->GetTransform().GetPosition();
-	myBlackboard->SetValue("PlayerPos"_tgaid, playerPos);
-
-	// stress data & active enemies data
-	myData.snapshotTimer += aFixedTime;
-	if (myData.snapshotTimer > DirectorStaticData::SNAP_SHOT_TIME)
-	{
-		myData.latestPlayerStress.Add(myData.playerStress);
-
-		myData.totalActiveEnemies = 0;
-		for (auto enemy : myEnemies)
-		{
-			if (enemy && enemy->CheckIfActive())
-			{
-				++myData.totalActiveEnemies;
-			}
-		}
-
-		myData.snapshotTimer = 0.f;
-	}
-
-	myData.stressTimer -= aFixedTime;
-	if (myData.stressTimer < 0.f && myData.playerStress > 0.f)
-	{
-		myData.playerStress -= DirectorStaticData::STRESS_DOWN_TICK * aFixedTime;
-		myData.playerStress = std::clamp(myData.playerStress, 0.f, 1.f);
-	}
-
-	// view frustum data
-	myCellIdsInFrustum.Clear();
-	myPlayerFrustum = CalculateFrustum(myData.playerCamera->GetCamera(), 25000.f);
-	for (auto& cell : myGrid)
-	{
-		const float distanceSquared = (GetXZPositionFromIndex(cell.id) - playerPos).LengthSqr();
-		if (distanceSquared < ((myActiveAreaRadius * 2.f) * (myActiveAreaRadius * 2.f)))
-		{
-			if (CheckIfXZPlanePosInFrustum(myPlayerFrustum, GetXZPositionFromIndex(cell.id)))
-			{
-				if (myGrid[cell.id].status != CellStatus::Invalid)
-				{
-					myCellIdsInFrustum.Insert(cell.id);
-				}
-			}
-		}
-	}
-
+	UpdatePlayerRelatedData(aFixedTime);
 	UpdateActiveArea(aFixedTime);
 	UpdateSpawnZones(aFixedTime);
 	UpdateHorde(aFixedTime);
@@ -1034,6 +989,7 @@ void Forge::AIDirector::OnEvent(const GameEvent& e)
 			if (DecompressCommand* decompress = dynamic_cast<DecompressCommand*>(command.get()))
 			{
 				decompress->SetIsDone(true);
+				Locator::GetAudioManager()->SetParameter(FmodId::MainMusic, static_cast<float>(Phases::BuildUp));
 			}
 		}
 		break;
@@ -1419,21 +1375,18 @@ bool Forge::AIDirector::CreateGridAndMapWorld()
 			}
 		}
 
-		// randomization of boss spawn zones
 		const int triangleCount = static_cast<int>(myRoughPath.size() - 1);
 		constexpr int subdivisions = 16;
 		int spacing = triangleCount / subdivisions;
 		std::vector<int> multipliers;
 
-		// starting subdivision higher than one, as not to place threat zone directly att player spawn.
-		// each iteration is then incremented by two as to lower the risk of two bosses ending upp exactly next each other
+		//starting subdivision higher than one, as not to place threat zone directly att player spawn.
 		for (int subDiv = 4; subDiv < subdivisions + 1; subDiv += 2)
 		{
 			multipliers.emplace_back(subDiv);
 		}
 
 		std::ranges::shuffle(multipliers, Locator::GetRandomNumberGenerator()->myRandomState.GetMyRandomState());
-
 		std::vector<SpecialEnemy> specialEnemies;
 
 		for (int sE = 0; sE < static_cast<int>(SpecialEnemy::Count); ++sE)
@@ -1441,7 +1394,6 @@ bool Forge::AIDirector::CreateGridAndMapWorld()
 			specialEnemies.emplace_back(static_cast<SpecialEnemy>(sE));
 		}
 
-		// the deck of bosses are shuffled, including a none-card as to make each boss encounter unpredictable
 		std::ranges::shuffle(specialEnemies, Locator::GetRandomNumberGenerator()->myRandomState.GetMyRandomState());
 
 		for (int mult = 0; mult < THREAT_ZONE_AMOUNT; ++mult)
@@ -1794,6 +1746,56 @@ void Forge::AIDirector::UpdateActiveArea(float)
 	}
 }
 
+void Forge::AIDirector::UpdatePlayerRelatedData(float fixedTime)
+{
+	// make player position available to all enemies
+	const Tga::Vector3f playerPos = myData.player->GetTransform().GetPosition();
+	myBlackboard->SetValue("PlayerPos"_tgaid, playerPos);
+
+	// stress data & active enemies data
+	myData.snapshotTimer += fixedTime;
+	if (myData.snapshotTimer > DirectorStaticData::SNAP_SHOT_TIME)
+	{
+		myData.latestPlayerStress.Add(myData.playerStress);
+
+		myData.totalActiveEnemies = 0;
+		for (auto enemy : myEnemies)
+		{
+			if (enemy && enemy->CheckIfActive())
+			{
+				++myData.totalActiveEnemies;
+			}
+		}
+
+		myData.snapshotTimer = 0.f;
+	}
+
+	myData.stressTimer -= fixedTime;
+	if (myData.stressTimer < 0.f && myData.playerStress > 0.f)
+	{
+		myData.playerStress -= DirectorStaticData::STRESS_DOWN_TICK * fixedTime;
+		myData.playerStress = std::clamp(myData.playerStress, 0.f, 1.f);
+	}
+
+	// view frustum data
+	myCellIdsInFrustum.Clear();
+	myPlayerFrustum = CalculateFrustum(myData.playerCamera->GetCamera(), 25000.f);
+	for (auto& cell : myGrid)
+	{
+		const float distanceSquared = (GetXZPositionFromIndex(cell.id) - playerPos).LengthSqr();
+		if (distanceSquared < ((myActiveAreaRadius * 2.f) * (myActiveAreaRadius * 2.f)))
+		{
+			if (CheckIfXZPlanePosInFrustum(myPlayerFrustum, GetXZPositionFromIndex(cell.id)))
+			{
+				if (myGrid[cell.id].status != CellStatus::Invalid)
+				{
+					myCellIdsInFrustum.Insert(cell.id);
+				}
+			}
+		}
+	}
+}
+
 void Forge::AIDirector::UpdateSpawnZones(float fixedTime)
 {
 	const Tga::Vector3f& playerPos = myData.player->GetTransform().GetPosition();
@@ -2029,7 +2031,7 @@ void Forge::AIDirector::SpawnEnemy(Object* aEnemy, const Tga::Vector3f& zone)
 	character->SetLinearAndAngularVelocity(JPH::Vec3::sZero(), JPH::Vec3::sZero());
 	bodyInterface->ActivateBody(bodyId);
 
-	/*if (myData.currentPhase != Phases::Relax)
+	if (myData.currentPhase != Phases::Relax)
 	{
 		int  state = Locator::GetRandomNumberGenerator()->GenerateRandomInt(1, STATE_DICE);
 		if (state >= WANDER_CHANCE)
@@ -2041,9 +2043,9 @@ void Forge::AIDirector::SpawnEnemy(Object* aEnemy, const Tga::Vector3f& zone)
 			aEnemy->GetComponent<CommonController>()->QueueNextState(CommonState::Idle);
 		}
 	}
-	else*/
+	else
 	{
-		aEnemy->GetComponent<CommonController>()->QueueNextState(CommonState::Wander);
+		aEnemy->GetComponent<CommonController>()->QueueNextState(CommonState::Idle);
 	}
 }
 
@@ -2184,9 +2186,9 @@ void Forge::AIDirector::UpdateCurrentPhase(float aFixedTime)
 	case Phases::BuildUp:
 	{
 		myData.buildUpTimer -= aFixedTime;
-		if (myData.buildUpTimer < 0.f/*myData.playerStress >= DirectorData::STRESS_PEAK_THRESHOLD*/)
+		if (myData.buildUpTimer < 0.f)
 		{
-			myData.buildUpTimer = DirectorStaticData::BUILD_UP_TIMER_RESET;
+			myData.buildUpTimer = myData.buildUpPhaseLength;
 			myData.currentPhase = Phases::Peak;
 			myData.hordeTimer = 0.f;
 			Locator::GetAudioManager()->SetParameter(FmodId::MainMusic, static_cast<float>(myData.currentPhase));
