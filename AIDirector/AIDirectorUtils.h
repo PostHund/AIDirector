@@ -33,11 +33,8 @@ namespace Forge
 
 		AreaSet& operator=(const std::vector<int>& container);
 		AreaSet& operator=(const AreaSet areaSet);
-		// AreaSet operator-(AreaSet& setB) const;
 		AreaSet operator-(const AreaSet& setB) const;
-		// void operator+=(AreaSet& setB);
 		void operator+=(const AreaSet& setB);
-		// void operator-=(AreaSet& setB);
 		void operator-=(const AreaSet& setB);
 
 		void Insert(int cellId);
