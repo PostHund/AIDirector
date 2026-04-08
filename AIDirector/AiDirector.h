@@ -61,7 +61,7 @@ namespace Forge
 		void CreateEnemies();
 		void SpawnMob(Tga::Vector3f& aFrom, Tga::Vector3f& aTo, int amount);
 
-		const std::array<Object*, ENEMY_MAX_TOTAL_AMOUNT>& GetEnemies() const { return myEnemies; }
+		const std::array<Object*, DirectorStaticData::ENEMY_MAX_TOTAL_AMOUNT>& GetEnemies() const { return myEnemies; }
 
 		void ProvideCrescendoPoint(int id, Tga::Vector3f& aPos);
 		void ProvideDecompressZone(Object* aZone);
@@ -109,7 +109,7 @@ namespace Forge
 
 		std::vector<std::shared_ptr<DirectorCommand>> myCommands;
 
-		std::array<Object*, ENEMY_MAX_TOTAL_AMOUNT> myEnemies{ nullptr };
+		std::array<Object*, DirectorStaticData::ENEMY_MAX_TOTAL_AMOUNT> myEnemies{ nullptr };
 		CommonData myCommonZombieData;
 		bool myHasCommonData       = false;
 		std::vector<std::pair<Tga::StringId, Tga::StringId>> myCommonAnimationsStrings;

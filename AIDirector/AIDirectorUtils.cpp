@@ -16,7 +16,7 @@ Forge::AreaSet& Forge::AreaSet::operator=(const AreaSet areaSet)
 		return *this;
 }
 
-Forge::AreaSet Forge::AreaSet::operator-(AreaSet& setB) const
+/*Forge::AreaSet Forge::AreaSet::operator-(AreaSet& setB) const
 {
 	std::vector<int> difference;
 	difference.reserve(27);
@@ -29,9 +29,9 @@ Forge::AreaSet Forge::AreaSet::operator-(AreaSet& setB) const
 		}
 	}
 	return AreaSet(difference);
-}
+}*/
 
-void Forge::AreaSet::operator+=(AreaSet& setB)
+/*void Forge::AreaSet::operator+=(AreaSet& setB)
 {
 	for (const int id : setB.myCellIds)
 	{
@@ -40,7 +40,7 @@ void Forge::AreaSet::operator+=(AreaSet& setB)
 			this->myCellIds.emplace_back(id);
 		}
 	}
-}
+}*/
 
 void Forge::AreaSet::operator+=(const AreaSet& setB)
 {
@@ -68,7 +68,7 @@ Forge::AreaSet Forge::AreaSet::operator-(const AreaSet& setB) const
 	return AreaSet(toKeep);
 }
 
-void Forge::AreaSet::operator-=(AreaSet& setB)
+/*void Forge::AreaSet::operator-=(AreaSet& setB)
 {
 	std::vector<int> toKeep;
 	toKeep.reserve(27);
@@ -80,7 +80,7 @@ void Forge::AreaSet::operator-=(AreaSet& setB)
 		}
 	}
 	this->myCellIds = toKeep;
-}
+}*/
 
 void Forge::AreaSet::operator-=(const AreaSet& setB)
 {
@@ -145,14 +145,6 @@ void Forge::PlayerLeftSpawnCommand::Update(float, AIDirector* aAiDirector)
 	}
 }
 
-Forge::DirectorCommand::DirectorCommand()
-{
-}
-
-Forge::DecompressCommand::DecompressCommand()
-{
-}
-
 Forge::DecompressCommand::DecompressCommand(AIDirector* aAiDirector)
 {
 	auto& data = aAiDirector->myData;
@@ -174,6 +166,7 @@ void Forge::DecompressCommand::Update(float, AIDirector* aAiDirector)
 		{
 			data.relaxTimer   = DirectorStaticData::RELAX_TIMER_RESET;
 			data.currentPhase = Phases::BuildUp;
+			data.buildUpTimer = data.buildUpPhaseLength;
 			Locator::GetAudioManager()->SetParameter(FmodId::MainMusic, static_cast<float>(data.currentPhase));
 		}
 

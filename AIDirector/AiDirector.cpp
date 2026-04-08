@@ -119,8 +119,8 @@ void Forge::AIDirector::SetDirectorData()
 	if (showJsonDataSettings)
 	{
 		ImGui::DragFloat("Build Up Phase Length", &myData.buildUpPhaseLength, 0.01f, 10.f, 180.f);
-		ImGui::DragInt("Min Horde Size", &myData.hordeMinSize, 1.f, 1, ENEMY_MAX_SPAWN);
-		ImGui::DragInt("Max Horde Size", &myData.hordeMaxSize, 1.f, 1, ENEMY_MAX_SPAWN);
+		ImGui::DragInt("Min Horde Size", &myData.hordeMinSize, 1.f, 1, DirectorStaticData::ENEMY_MAX_SPAWN);
+		ImGui::DragInt("Max Horde Size", &myData.hordeMaxSize, 1.f, 1, DirectorStaticData::ENEMY_MAX_SPAWN);
 		ImGui::DragFloat("Min Horde Interval", &myData.hordeMinInterval, 0.01f, 3.f, 60.f);
 		ImGui::DragFloat("Max Horde Interval", &myData.hordeMaxInterval, 0.01f, 3.f, 60.f);
 
@@ -276,7 +276,7 @@ void Forge::AIDirector::EnemyDebug(std::string& debugText)
 		static std::string selectedZombie = "";
 		if (ImGui::BeginCombo("Select zombie", currentZombieName.c_str()))
 		{
-			for (int enemyIndex = 0; enemyIndex < ENEMY_MAX_TOTAL_AMOUNT; ++enemyIndex)
+			for (int enemyIndex = 0; enemyIndex < DirectorStaticData::ENEMY_MAX_TOTAL_AMOUNT; ++enemyIndex)
 			{
 				const bool is_selected = (currentIndex == enemyIndex);
 
@@ -655,7 +655,7 @@ void Forge::AIDirector::MiniMapDebug(std::string& debugText)
 		}
 
 		std::vector<std::pair<ImVec2, CommonState>> enemyDots;
-		enemyDots.reserve(ENEMY_MAX_TOTAL_AMOUNT);
+		enemyDots.reserve(DirectorStaticData::ENEMY_MAX_TOTAL_AMOUNT);
 		for (auto enemy : myEnemies)
 		{
 			if (enemy && enemy->CheckIfActive())
@@ -717,8 +717,8 @@ void Forge::AIDirector::MiniMapDebug(std::string& debugText)
 		textSize = ImGui::CalcTextSize(debugText.c_str()).x;
 		drawList->AddText(canvasP0 + ImVec2(canvasSize.x - (textSize + margin), gridStepY * 8.f), IM_COL32(255, 255, 255, 255), debugText.c_str());
 
-		debugText = "Active enemies: " + std::to_string(myData.totalActiveEnemies) + " / " + std::to_string(ENEMY_MAX_SPAWN);
-		textSize = ImGui::CalcTextSize(debugText.c_str()).x;
+		debugText = "Active enemies: " + std::to_string(myData.totalActiveEnemies) + " / " + std::to_string(DirectorStaticData::ENEMY_MAX_SPAWN);
+		textSize  = ImGui::CalcTextSize(debugText.c_str()).x;
 		drawList->AddText(canvasP0 + ImVec2(canvasSize.x - (textSize + margin), gridStepY * 10.f), IM_COL32(255, 255, 255, 255), debugText.c_str());
 
 		ImGui::InvisibleButton("canvas", canvasSize);
@@ -1035,7 +1035,7 @@ void Forge::AIDirector::OnEvent(const GameEvent& e)
 		Object* bomb = e.GetValue<Object*>();
 		constexpr float attractionRadiusSqr = 2000.f * 2000.f; // twenty meters squared
 		std::vector<Object*> enemiesInRange;
-		enemiesInRange.reserve(ENEMY_MAX_TOTAL_AMOUNT);
+		enemiesInRange.reserve(DirectorStaticData::ENEMY_MAX_TOTAL_AMOUNT);
 
 		const Tga::Vector3f bombPos = bomb->GetTransform().GetPosition();
 
@@ -1337,7 +1337,7 @@ bool Forge::AIDirector::CreateGridAndMapWorld()
 	{
 		if (cell.status == CellStatus::OtherPath)
 		{
-			cell.zCount = static_cast<int8_t>(randomGenerator->GenerateRandomInt(NULL_CHANCE_SPAWN, OTHER_PATH_MAX_SPAWN));
+			cell.zCount = static_cast<int8_t>(randomGenerator->GenerateRandomInt(DirectorStaticData::NULL_CHANCE_SPAWN, DirectorStaticData::OTHER_PATH_MAX_SPAWN));
 		}
 	}
 
@@ -1371,7 +1371,7 @@ bool Forge::AIDirector::CreateGridAndMapWorld()
 		{
 			if (cell.status == CellStatus::MainPath)
 			{
-				cell.zCount = static_cast<int8_t>(randomGenerator->GenerateRandomInt(0, MAIN_PATH_MAX_SPAWN));
+				cell.zCount = static_cast<int8_t>(randomGenerator->GenerateRandomInt(0, DirectorStaticData::MAIN_PATH_MAX_SPAWN));
 			}
 		}
 
@@ -1396,7 +1396,7 @@ bool Forge::AIDirector::CreateGridAndMapWorld()
 
 		std::ranges::shuffle(specialEnemies, Locator::GetRandomNumberGenerator()->myRandomState.GetMyRandomState());
 
-		for (int mult = 0; mult < THREAT_ZONE_AMOUNT; ++mult)
+		for (int mult = 0; mult < DirectorStaticData::THREAT_ZONE_AMOUNT; ++mult)
 		{
 			int threatZoneIndex = multipliers[mult] * spacing;
 			int gridIndex = GetCellIndexFromPosition(myRoughPath[threatZoneIndex]);
@@ -1444,9 +1444,9 @@ void Forge::AIDirector::CreateEnemies()
 	const std::string femaleZombie = "FemaleZombie_";
 	Tga::StringId objectDefinitionName;
 
-	while (zombieIndex < ENEMY_MAX_TOTAL_AMOUNT / 2)
+	while (zombieIndex < DirectorStaticData::ENEMY_MAX_TOTAL_AMOUNT / 2)
 	{
-		for (unsigned int i = 0; i < (ENEMY_MAX_SPAWN / 4); ++i)
+		for (unsigned int i = 0; i < (DirectorStaticData::ENEMY_MAX_SPAWN / 4); ++i)
 		{
 			zombieName = maleZombie + std::to_string(i + 1);
 			objectDefinitionName = Tga::StringRegistry::RegisterOrGetString(zombieName);
@@ -1463,9 +1463,9 @@ void Forge::AIDirector::CreateEnemies()
 
 	myHasCommonAnimationPlayers = false;
 
-	while (zombieIndex < ENEMY_MAX_TOTAL_AMOUNT)
+	while (zombieIndex < DirectorStaticData::ENEMY_MAX_TOTAL_AMOUNT)
 	{
-		for (unsigned int i = 0; i < (ENEMY_MAX_SPAWN / 4); ++i)
+		for (unsigned int i = 0; i < (DirectorStaticData::ENEMY_MAX_SPAWN / 4); ++i)
 		{
 			zombieName = femaleZombie + std::to_string(i + 1);
 			objectDefinitionName = Tga::StringRegistry::RegisterOrGetString(zombieName);
@@ -1537,13 +1537,13 @@ void Forge::AIDirector::PopulateWorld()
 			{
 				SpawnEnemy(myEnemies[zombieIndex], spawnPoint);
 				zombieIndex++;
-				if (zombieIndex >= ENEMY_MAX_TOTAL_AMOUNT)
+				if (zombieIndex >= DirectorStaticData::ENEMY_MAX_TOTAL_AMOUNT)
 				{
 					break;
 				}
 			}
 		}
-		if (zombieIndex >= ENEMY_MAX_TOTAL_AMOUNT)
+		if (zombieIndex >= DirectorStaticData::ENEMY_MAX_TOTAL_AMOUNT)
 		{
 			break;
 		}
@@ -1570,7 +1570,7 @@ Object* Forge::AIDirector::InstantiateEnemy(Tga::StringId anObjectDefinitionName
 	}
 
 	Object* newObject = *objectManager->AccessObjects().emplace(new Object(anObjectType));
-	newObject->GetTransform().SetPosition({HIDDEN, HIDDEN, HIDDEN }/*ourAIBlackboard.GetValue<Tga::Vector3f>("PlayerPos"_tgaid)*/);
+	newObject->GetTransform().SetPosition({DirectorStaticData::HIDDEN, DirectorStaticData::HIDDEN, DirectorStaticData::HIDDEN });
 	SceneLoading::ScenePropertyExtractor props(definition->EditProperties());
 
 	const std::vector<const Tga::SceneModel*> sceneModels = props.GetAllCopyOnWriteWrapperByType<Tga::SceneModel>();
@@ -1676,7 +1676,7 @@ void Forge::AIDirector::UpdateActiveArea(float)
 	{
 		myExitedArea = tempExited;
 		std::vector<Object*> toDespawn;
-		toDespawn.reserve(myExitedArea.Size() * MAIN_PATH_MAX_SPAWN);
+		toDespawn.reserve(myExitedArea.Size() * DirectorStaticData::MAIN_PATH_MAX_SPAWN);
 
 		for (auto zombie : myEnemies)
 		{
@@ -1702,7 +1702,7 @@ void Forge::AIDirector::UpdateActiveArea(float)
 	{
 		myEnteredArea = tempEntered;
 		std::vector<Object*> toSpawn;
-		toSpawn.reserve(ENEMY_MAX_TOTAL_AMOUNT);
+		toSpawn.reserve(DirectorStaticData::ENEMY_MAX_TOTAL_AMOUNT);
 
 		// spawn new enemies in recently entered area, granted player stress level is not to high.
 		if (myData.currentPhase != Phases::Relax && myData.currentPhase != Phases::PeakFade)
@@ -1731,12 +1731,12 @@ void Forge::AIDirector::UpdateActiveArea(float)
 						toSpawn.pop_back();
 						SpawnEnemy(ready, spawnPoint);
 						++myData.totalActiveEnemies;
-						if (toSpawn.empty() || myData.totalActiveEnemies >= ENEMY_MAX_SPAWN)
+						if (toSpawn.empty() || myData.totalActiveEnemies >= DirectorStaticData::ENEMY_MAX_SPAWN)
 						{
 							break;
 						}
 					}
-					if (toSpawn.empty() || myData.totalActiveEnemies >= ENEMY_MAX_SPAWN)
+					if (toSpawn.empty() || myData.totalActiveEnemies >= DirectorStaticData::ENEMY_MAX_SPAWN)
 					{
 						break;
 					}
@@ -1822,7 +1822,7 @@ void Forge::AIDirector::UpdateSpawnZones(float fixedTime)
 			const Tga::Vector3f cellToPlayer = (playerCellPosition - otherCellPosition);
 			const float distance = cellToPlayer.Length();
 			// lower number means more generous inclusion
-			if (distance < (myActiveAreaRadius * HORDE_AREA_FIDELITY))
+			if (distance < (myActiveAreaRadius * DirectorStaticData::HORDE_AREA_FIDELITY))
 			{
 				impossibleZones.Insert(cell);
 				continue;
@@ -1865,7 +1865,7 @@ void Forge::AIDirector::UpdateSpawnZones(float fixedTime)
 		std::ranges::sort(myPossibleHordeSpawnZones.AccessCells().begin(), myPossibleHordeSpawnZones.AccessCells().end(), sortClosestToPlayer);
 
 		// only keep the few closest ones
-		const int maxZones = std::clamp(static_cast<int>(myPossibleHordeSpawnZones.GetCells().size()), 0, SPAWN_ZONE_ROOF);
+		const int maxZones = std::clamp(static_cast<int>(myPossibleHordeSpawnZones.GetCells().size()), 0, DirectorStaticData::SPAWN_ZONE_ROOF);
 
 		if (maxZones == 0) { return; }
 
@@ -1986,9 +1986,9 @@ void Forge::AIDirector::DespawnEnemy(Object* aEnemy)
 	auto& character = commonController->AccessCharacter();
 	auto bodyId = character->GetBodyID();
 	auto bodyInterface = Locator::GetPhysicsEngine()->GetBodyInterface();
-	character->SetPosition({ HIDDEN, HIDDEN, HIDDEN }, JPH::EActivation::DontActivate);
+	character->SetPosition({DirectorStaticData::HIDDEN, DirectorStaticData::HIDDEN, DirectorStaticData::HIDDEN }, JPH::EActivation::DontActivate);
 	commonController->Update(1.f / 60.f);
-	aEnemy->GetTransform().SetPosition({ HIDDEN, HIDDEN, HIDDEN });
+	aEnemy->GetTransform().SetPosition({DirectorStaticData::HIDDEN, DirectorStaticData::HIDDEN, DirectorStaticData::HIDDEN });
 	commonController->QueueNextState(CommonState::Idle);
 	AnimatedModelComponent* animatedModel = aEnemy->GetComponent<AnimatedModelComponent>();
 	animatedModel->Update(1.f / 60.f);
@@ -2033,8 +2033,8 @@ void Forge::AIDirector::SpawnEnemy(Object* aEnemy, const Tga::Vector3f& zone)
 
 	if (myData.currentPhase != Phases::Relax)
 	{
-		int  state = Locator::GetRandomNumberGenerator()->GenerateRandomInt(1, STATE_DICE);
-		if (state >= WANDER_CHANCE)
+		int  state = Locator::GetRandomNumberGenerator()->GenerateRandomInt(1, DirectorStaticData::STATE_DICE);
+		if (state >= DirectorStaticData::WANDER_CHANCE)
 		{
 			aEnemy->GetComponent<CommonController>()->QueueNextState(CommonState::Wander);
 		}
@@ -2067,10 +2067,11 @@ bool Forge::AIDirector::CheckIfXZPlanePosInFrustum(const Frustum& aFrustum, cons
 {
 	//     a     
 	//     /\    
-	//    /  \   *
+	//    /  \   
 	//   / *  \  
 	//  /______\ 
 	// c        b
+
 	const Tga::Vector3f playerPos = myData.player->GetTransform().GetPosition();
 	const Tga::Matrix4x4f playerPhysAxis = CalculatePlayerPhysMatrix();
 	const Tga::Vector2f center = { aCenter.x, aCenter.z };

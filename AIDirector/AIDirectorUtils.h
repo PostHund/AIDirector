@@ -1,63 +1,25 @@
 #pragma once
+#include "AIDirectorCommon.h"
 #include "tge/math/Vector.h"
 #include <vector>
-#include <cstdint>
-#include <tge/math/color.h>
+
+
 
 class MainCamera;
 class PlayerController;
-constexpr uint32_t INVALID_ID = UINT_MAX;
-constexpr uint32_t ENEMY_MAX_TOTAL_AMOUNT = 60;
-constexpr uint32_t ENEMY_MAX_SPAWN = 40;
-constexpr int OTHER_PATH_MAX_SPAWN = 1;
-constexpr int MAIN_PATH_MAX_SPAWN = 2;
-constexpr int THREAT_ZONE_AMOUNT = 3;
-constexpr int STATE_DICE = 6;
-constexpr int WANDER_CHANCE = 5;
-constexpr int NULL_CHANCE_SPAWN = -3;
-constexpr int SPAWN_ZONE_ROOF = 5;
-constexpr float HORDE_AREA_FIDELITY = 0.45f;
 
-
-constexpr float HIDDEN = -5000000.f;
 
 class Object;
 
 namespace Forge
 {
 	class AIDirector;
-	enum class Phases : uint8_t
-	{
-		Relax,
-		BuildUp,
-		Peak,
-		PeakFade
-	};
 
-	enum class CellStatus : uint8_t
-	{
-		Invalid,
-		MainPath,
-		OtherPath,
-		ThreatZone,
-		PlayerSpawnZone,
-		DecompressZone,
-		Count
-	};
-
-	enum class SpecialEnemy : uint8_t
-	{
-		Boomer,
-		Chad,
-		None,
-		Streamer,
-		Count
-	};
 
 	struct AIDCell
 	{
-		uint32_t id = INVALID_ID;
-		int8_t zCount = 0;
+		uint32_t id       = DirectorStaticData::INVALID_ID;
+		int8_t zCount     = 0;
 		CellStatus status = CellStatus::Invalid;
 	};
 
@@ -71,11 +33,11 @@ namespace Forge
 
 		AreaSet& operator=(const std::vector<int>& container);
 		AreaSet& operator=(const AreaSet areaSet);
-		AreaSet operator-(AreaSet& setB) const;
+		// AreaSet operator-(AreaSet& setB) const;
 		AreaSet operator-(const AreaSet& setB) const;
-		void operator+=(AreaSet& setB);
+		// void operator+=(AreaSet& setB);
 		void operator+=(const AreaSet& setB);
-		void operator-=(AreaSet& setB);
+		// void operator-=(AreaSet& setB);
 		void operator-=(const AreaSet& setB);
 
 		void Insert(int cellId);
@@ -95,13 +57,13 @@ namespace Forge
 	struct ThreatZone
 	{
 		Tga::Vector3f spawnPoint = Tga::Vector3f::Zero;
-		uint32_t cellId = INVALID_ID;
+		uint32_t cellId = DirectorStaticData::INVALID_ID;
 		SpecialEnemy special = SpecialEnemy::None;
 	};
 
 	struct CrescendoPoint
 	{
-		uint32_t id = INVALID_ID;
+		uint32_t id = DirectorStaticData::INVALID_ID;
 		Tga::Vector3f position = Tga::Vector3f::Zero;
 	};
 
@@ -128,48 +90,13 @@ namespace Forge
 		size_t currentIndex = MAX_SIZE - 1;
 	};
 
-	namespace DirectorStaticData
-	{
-		//player stress
-		static constexpr float STRESS_MAX = 1.f;
-		static constexpr float STRESS_MODIFIER = 1.2f;
-		static constexpr float STRESS_PEAK_THRESHOLD = 0.99f;
-		static constexpr float STRESS_MIN_THRESHOLD = 0.05f;
-		static constexpr float STRESS_DURATION_RESET = 10.f; // how long the player stays stressed, before stress starting to tick down
-		static constexpr float STRESS_DOWN_TICK = 0.05f; // how much stress ticks down per second
-		static constexpr float KILL_RANGE_SQR = 500.f * 500.f;
-		static constexpr float SPLATTER_RANGE_SQR = 300.f * 300.f;
-		static constexpr float ENEMY_KILLED_STRESS_VALUE = 0.01f; // if enemy killed within 8 meters stress goes up
-		static constexpr float TAKING_DAMAGE_STRESS_VALUE = 0.05f; //  if player gets hit tress goes up
-		static constexpr float ATTACKED_BY_SPECIAL_STRESS_VALUE = STRESS_MAX;
 
-		// SpawnZones
-		static constexpr float UPDATE_SPAWN_ZONE_TIME = 0.75f;
-
-		// Phases
-		static constexpr float RELAX_TIMER_RESET = 15.f;
-		static constexpr float BUILD_UP_TIMER_RESET = 90.f;
-		static constexpr float PEAK_TIMER_RESET = 0.f;
-		static constexpr float PEAK_MAX_TIME = 60.f;
-		static constexpr float PEAK_FADE_TIMER_RESET = 15.f;
-
-		// Horde 
-		static constexpr float HORDE_TIMER_MIN_RESET = 10.f;
-		static constexpr float HORDE_TIMER_MAX_RESET = 20.f;
-		static constexpr int HORDE_MIN_SIZE = 2;
-		static constexpr int HORDE_MAX_SIZE = 9;
-	
-
-		// for statistics 
-		static constexpr float SNAP_SHOT_TIME = 0.016666f;
-	}
 	struct DirectorDynamicData
 	{
 		// for statistics 
 		CircularBuffer latestPlayerStress;
 		uint32_t totalActiveEnemies = 0;
 		float snapshotTimer = 0.f;
-		
 
 		//player stress
 		float playerStress = 0.f;
@@ -187,7 +114,7 @@ namespace Forge
 
 		// Build up
 		float buildUpPhaseLength = DirectorStaticData::BUILD_UP_TIMER_RESET;
-		float buildUpTimer       = DirectorStaticData::BUILD_UP_TIMER_RESET;
+		float buildUpTimer = DirectorStaticData::BUILD_UP_TIMER_RESET;
 
 		// peak
 		float peakTimer = DirectorStaticData::PEAK_TIMER_RESET;
@@ -216,7 +143,7 @@ namespace Forge
 	class DirectorCommand
 	{
 	public:
-		DirectorCommand();
+		DirectorCommand() = default;
 		virtual ~DirectorCommand() = default;
 		virtual void Update(float, AIDirector*) {}
 		virtual bool CheckIsDone() const { return myIsDone; }
@@ -228,7 +155,7 @@ namespace Forge
 	class DecompressCommand :public DirectorCommand
 	{
 	public:
-		DecompressCommand();
+		DecompressCommand() = default;
 		DecompressCommand(AIDirector* aAiDirector);
 		void Update(float fixedTime, AIDirector*) override;
 	};
@@ -237,15 +164,5 @@ namespace Forge
 	{
 		void Update(float fixedTime, AIDirector*) override;
 	};
-
-	
 }
 
-static const Tga::Color GRID_COLORS[static_cast<int>(Forge::CellStatus::Count)]
-{
-	{1.f,1.f,1.f,1.f},		// Invalid, white
-	{0.f,.7f,0.f,1.f},		// MainPath, green
-	{.7f,.7f,0.f,1.f},		// OtherPath, yellow
-	{1.f,0.f,0.f,1.f},		// ThreatZone, red
-	{1.f,1.f,1.f,1.f}		// player spawn zone, white
-};
