@@ -16,32 +16,6 @@ Forge::AreaSet& Forge::AreaSet::operator=(const AreaSet areaSet)
 		return *this;
 }
 
-/*Forge::AreaSet Forge::AreaSet::operator-(AreaSet& setB) const
-{
-	std::vector<int> difference;
-	difference.reserve(27);
-
-	for (const int id : this->myCellIds)
-	{
-		if (std::ranges::find(setB.myCellIds.begin(), setB.myCellIds.end(), id) == setB.myCellIds.end())
-		{
-			difference.emplace_back(id);
-		}
-	}
-	return AreaSet(difference);
-}*/
-
-/*void Forge::AreaSet::operator+=(AreaSet& setB)
-{
-	for (const int id : setB.myCellIds)
-	{
-		if (std::ranges::find(this->myCellIds.begin(), this->myCellIds.end(), id) == this->myCellIds.end())
-		{
-			this->myCellIds.emplace_back(id);
-		}
-	}
-}*/
-
 void Forge::AreaSet::operator+=(const AreaSet& setB)
 {
 	for (const int id : setB.myCellIds)
@@ -67,20 +41,6 @@ Forge::AreaSet Forge::AreaSet::operator-(const AreaSet& setB) const
 	}
 	return AreaSet(toKeep);
 }
-
-/*void Forge::AreaSet::operator-=(AreaSet& setB)
-{
-	std::vector<int> toKeep;
-	toKeep.reserve(27);
-	for (const int id : this->myCellIds)
-	{
-		if (std::ranges::find(setB.myCellIds.begin(), setB.myCellIds.end(), id) == setB.myCellIds.end())
-		{
-			toKeep.emplace_back(id);
-		}
-	}
-	this->myCellIds = toKeep;
-}*/
 
 void Forge::AreaSet::operator-=(const AreaSet& setB)
 {
